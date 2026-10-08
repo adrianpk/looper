@@ -22,6 +22,7 @@ for a capability reference that agents can read without a configuration.
 
 ## Contents
 
+- [Where Looper fits](#where-looper-fits)
 - [Quick start](#quick-start)
 - [Requirements and installation](#requirements-and-installation)
 - [Operational structure](#operational-structure)
@@ -35,6 +36,24 @@ for a capability reference that agents can read without a configuration.
 - [Recovery and blockers](#recovery-and-blockers)
 - [Files and compatibility](#files-and-compatibility)
 - [Development checks](#development-checks)
+
+## Where Looper fits
+
+Looper is a lightweight, CLI-focused execution alternative that can work with
+development artifacts prepared for [KAL](https://forge.adrianpk.com/adrianpk/kal)
+and [Chryso (CHR)](https://forge.adrianpk.com/adrianpk/chr), provided their plan
+and tracker follow [Looper's contract](#operational-structure). It has served as
+an occasional replacement for their execution workflows in specific contexts.
+
+Looper has no GUI or built-in workflow for task clarification, specification
+authoring or planning. The agent harness can prepare those artifacts, obtain
+approval, and then use Looper to execute, inspect and resume the approved
+delivery.
+
+For use cases that need more ergonomic operator tools or the complete workflow
+from initial intent through planning and execution, see KAL and Chryso. KAL
+provides guided task preparation and Telegram control. Chryso provides a TUI
+and an optional local Web UI for managing project artifacts and execution.
 
 ## Quick start
 
