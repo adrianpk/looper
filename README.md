@@ -767,12 +767,16 @@ looper --watch --run RUN_ID
 
 | Backend | Client opened by watch |
 | --- | --- |
-| Herdr | Native interactive session client |
+| Herdr | Text view inside Herdr; native interactive session client otherwise |
 | Zellij | Native read-only `watch` client |
 | tmux | Native read-only attachment on the `slice-loop` socket |
 
 Watching opens the existing view without starting a worker or advancing a
-checkpoint. Herdr's interactive client accepts native input. Selection,
+checkpoint. Inside a Herdr pane, the text view reads the recorded session and
+pane once per second. It joins soft-wrapped JSONL events and preserves their
+slice, phase and message. Ctrl+C closes only this viewer.
+
+Outside Herdr, its native interactive client accepts native input. Selection,
 copying, scrolling and detaching use the backend's own controls or the enclosing
 terminal. Detaching the client preserves the controller.
 

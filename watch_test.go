@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The same binary opens the exact project's native view without shell parsing, worker input or checkpoint writes.
@@ -18,7 +22,7 @@ func TestWatch(t *testing.T) {
 		backend string
 		args    []string
 	}{
-		{"herdr", []string{"session", "attach", "--", session}},
+		{"herdr", []string{"session", "attach", session}},
 		{"zellij", []string{"watch", "--", session}},
 		{"tmux", []string{"-L", "slice-loop", "attach-session", "-r", "-t", "=" + session}},
 	} {
@@ -46,10 +50,14 @@ func TestWatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Chdir(a.config.Repo)
+			t.Setenv("HERDR_ENV", "")
 			t.Setenv("HERDR_SOCKET_PATH", "/outer/socket")
 			t.Setenv("TMUX", "outer")
 			dir := t.TempDir()
 			stub := "#!/bin/sh\n[ -z \"${HERDR_SOCKET_PATH-}${TMUX-}\" ] || exit 78\nprintf '%s\\n' \"$@\"\n"
+			if tc.backend == "herdr" {
+				stub = "#!/bin/sh\n[ -z \"${HERDR_ENV-}${HERDR_SOCKET_PATH-}${TMUX-}\" ] || exit 78\n[ \"$#\" -eq 3 ] && [ \"$1\" = session ] && [ \"$2\" = attach ] && [ \"$3\" != -- ] || exit 64\nprintf '%s\\n' \"$@\"\n"
+			}
 			if err := os.WriteFile(filepath.Join(dir, tc.backend), []byte(stub), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -73,6 +81,153 @@ func TestWatch(t *testing.T) {
 				t.Fatalf("watch advanced the run: %v %v %+v", err, fixtureErr, f)
 			}
 		})
+	}
+}
+
+// The text view retains event context, follows overlapping snapshots and waits for complete JSONL records.
+func TestWatchText(t *testing.T) {
+	const event = `{"schema_version":1,"time":"2026-10-09T10:00:00Z","type":"worker.message","label":"Slice 2/3 · implement · turn 4","message":"Task: preserve progress"}`
+	const rendered = "[2026-10-09T10:00:00Z] Slice 2/3 · implement · turn 4 · Task: preserve progress\n"
+	for _, tc := range []struct {
+		name      string
+		snapshots []string
+		want      string
+	}{
+		{"event context", []string{event}, rendered},
+		{"human output", []string{"Slice 2/3 · implement · Task: preserve progress"}, "Slice 2/3 · implement · Task: preserve progress\n"},
+		{"other JSON", []string{`{"schema_version":1,"result":"diagnostic"}`}, "{\"schema_version\":1,\"result\":\"diagnostic\"}\n"},
+		{"unchanged", []string{event, event}, rendered},
+		{"scrollback", []string{"first\nsecond", "second\nthird"}, "first\nsecond\nthird\n"},
+		{"repeated lines", []string{"repeat", "repeat\nrepeat"}, "repeat\nrepeat\n"},
+		{"partial event", []string{"first\n" + event[:80], "first\n" + event}, "first\n" + rendered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			var previous []string
+			for _, snapshot := range tc.snapshots {
+				var err error
+				previous, err = writeWatchSnapshot(&out, previous, snapshot)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out.String() != tc.want {
+				t.Fatalf("text view = %q, want %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// Real Herdr unwraps JSONL from the recorded pane; watching from another pane never attaches or changes the run.
+func TestHerdrWatch(t *testing.T) {
+	if _, err := exec.LookPath("herdr"); err != nil {
+		t.Skip("herdr is not installed")
+	}
+	recoveryEnvironment(t)
+	a, fixturePath := setupLoop(t, "normal")
+	if err := a.save(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(a.dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := registerRun(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := acquireRun(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.close()
+	terminal := &terminalRef{Backend: "herdr", Session: "watch-" + entry.ID}
+	t.Cleanup(func() {
+		if _, err := terminal.command(a.config.Repo, "session", "stop", terminal.Session, "--json"); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := terminal.prepareHerdr(a); err != nil {
+		t.Fatal(err)
+	}
+	a.runtime = &runRuntime{Terminal: terminal}
+	if err := a.saveRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	label := "Slice 2/3 · implement · turn 4"
+	message := "Task: preserve " + strings.Repeat("wrapped progress ", 24) + "and its message"
+	event, err := json.Marshal(logEvent{SchemaVersion: 1, Type: "worker.message", Label: label, Message: message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, append(event, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := filepath.Join(filepath.Dir(path), "next.jsonl")
+	event, err = json.Marshal(logEvent{SchemaVersion: 1, Type: "worker.message", Label: label, Message: "Task: next update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(next, append(event, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	release := filepath.Join(filepath.Dir(path), "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0600) })
+	producer := "cat " + shellQuote(path) + "; while [ ! -f " + shellQuote(release) + " ]; do sleep 0.05; done; cat " + shellQuote(next)
+	if _, err := terminal.command(a.config.Repo, "pane", "run", terminal.Pane, producer); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(a.config.Repo)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "outer-pane")
+	t.Setenv("HERDR_SOCKET_PATH", "/outer/socket")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "looper", "--watch")
+	var diagnostic bytes.Buffer
+	command.Stderr = &diagnostic
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(stdout)
+	found, followed := 0, false
+	for scanner.Scan() {
+		if scanner.Text() == label+" · "+message {
+			found++
+			if err := os.WriteFile(release, nil, 0600); err != nil {
+				t.Error(err)
+			}
+		}
+		if scanner.Text() == label+" · Task: next update" {
+			followed = true
+			if err := command.Process.Signal(os.Interrupt); err != nil {
+				t.Error(err)
+			}
+			break
+		}
+	}
+	waitErr := command.Wait()
+	if found != 1 || !followed || waitErr != nil || diagnostic.Len() != 0 {
+		t.Fatalf("recorded pane view failed: found=%d followed=%v scan=%v wait=%v diagnostic=%s", found, followed, scanner.Err(), waitErr, diagnostic.String())
+	}
+	after, err := os.ReadFile(filepath.Join(a.dir, "state.json"))
+	var f fixture
+	fixtureErr := readJSON(fixturePath, &f)
+	if err != nil || !bytes.Equal(before, after) || fixtureErr != nil || f.Calls != 0 || f.Merges != 0 {
+		t.Fatalf("text watch advanced the run: %v %v %+v", err, fixtureErr, f)
+	}
+}
+
+// Missing pane metadata must fail instead of reading the caller's current pane or opening another client.
+func TestHerdrWatchMissingPane(t *testing.T) {
+	err := watchHerdr(context.Background(), runInfo{Terminal: &terminalRef{Backend: "herdr", Session: "loop"}}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "no recorded pane") {
+		t.Fatalf("missing pane was not rejected: %v", err)
 	}
 }
 

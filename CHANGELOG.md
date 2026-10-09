@@ -34,3 +34,9 @@ Notable changes to Looper are documented here.
   lines. Detached recovery applies the selected format to its controller pane;
   `--json` continues to return a separate single startup result. Closing a log
   consumer does not interrupt the active delivery.
+
+### Fixed
+
+- `looper --watch` uses valid Herdr attachment arguments. Inside Herdr, it
+  follows the recorded pane as text, preserving slice, phase and message
+  without opening a nested client or interrupting delivery.

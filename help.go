@@ -104,7 +104,9 @@ JSON results (--json):
 Views and copying:
   looper --watch opens the selected project's native backend; no separate script is needed.
   run.view_command is looper --watch --run RUN_ID for an exact returned run.
-  terminal.backend identifies Herdr (interactive), Zellij or tmux (read-only).
+  Inside Herdr, watch follows the recorded pane as text, retaining slice, phase and message.
+  Ctrl+C closes that text viewer without interrupting the controller.
+  Otherwise Herdr opens its interactive client; Zellij and tmux use read-only clients.
   Opening a view preserves the existing worker. Use native selection/copy controls.
   tmux read-only attachment restricts keyboard copy mode; interactive attachment is:
   tmux -L slice-loop attach-session -t '=SESSION'
