@@ -53,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity", "preflight":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -61,6 +61,8 @@ func execute(args []string) error {
 	pr := fs.Int("pr", 0, "pull request number")
 	worktree := fs.String("worktree", "", "validation checkout")
 	retryUnmerged := fs.Bool("retry-unmerged", false, "operator confirmed the previous uncertain merge did not apply")
+	gatePolicy := fs.String("policy", "", "explicitly approved final-gate repair policy JSON")
+	failedHead := fs.String("failed-head", "", "adopt a retained pre-upgrade failed gate candidate")
 	showActivity := fs.Bool("activity", false, "show live worker activity; visibility can change during a run")
 	color := fs.String("color", string(defaultColor), "terminal colors: auto, always, never")
 	output := fs.String("output", string(defaultOutput), "stream output: jsonl, human")
@@ -77,6 +79,19 @@ func execute(args []string) error {
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if (*gatePolicy != "" || *failedHead != "") && args[0] != "authorize-gate-repairs" {
+		return errors.New("--policy and --failed-head belong to authorize-gate-repairs")
+	}
+	if args[0] == "authorize-gate-repairs" {
+		if *gatePolicy == "" {
+			return errors.New("authorize-gate-repairs requires --policy")
+		}
+		if err := authorizeGateRepairs(*configPath, *gatePolicy, *failedHead); err != nil {
+			return err
+		}
+		fmt.Println("Final-gate repair authority pinned. Configuration, progress and budgets preserved. No worker started.")
+		return nil
 	}
 	if !validColor(colorMode(*color)) {
 		return errors.New("--color must be auto, always, or never")

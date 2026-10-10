@@ -121,7 +121,7 @@ Record successful checks through the controller instead of running the same fina
 %s validate --config %s --worktree <slice-worktree> --command '<exact command>' --command '<next command>' --command 'git diff --check'
 Use structured subprocess arguments or correct shell quoting for actual paths. Validation evidence belongs to the exact clean HEAD and the exact ordered command list. If the PR head changes afterward, evidence must be regenerated. The controller executes missing checks before merging.
 
-Perform only the current instruction. In prepare_gate, prepare fixtures and return ready_for_gate without running the full gate. In close, use the controller's exact gate evidence and close only approved documentation paths. Record required completed activity through Acta. Stop only owned fixtures after their checks finish. Core operational documents must not name an outer product or justify core capabilities by its needs.
+Perform only the current instruction. In repair_gate, read gate_repair_policy and the last gate_repairs entry from the checkpoint. Its identity overrides the original slice identity for this repair: use exactly its branch, title, existing Slice N report and required command prefix. Diagnose the retained gate failure; correct only the approved set within allowed_paths. Do not invent another numbered slice, weaken checks, run the full gate, merge, or continue a successor. Prepare focused exact-HEAD validation and return pr_ready; the controller integrates and reruns the unchanged full gate. In prepare_gate, prepare fixtures and return ready_for_gate without running the full gate. In close, use the controller's exact gate evidence and close only approved documentation paths. Record required completed activity through Acta. Stop only owned fixtures after their checks finish. Core operational documents must not name an outer product or justify core capabilities by its needs.
 
 Return the required JSON status and a concise factual message. A response is not proof of completion: the controller verifies actual remote and repository state.`, a.path, filepath.Join(a.dir, "state.json"), a.config.Repo, a.config.Plan, a.config.Tracker, phase, task, executable, a.path)
 	args := []string{"exec"}
@@ -160,7 +160,11 @@ Return the required JSON status and a concise factual message. A response is not
 		}
 	}
 	if a.activity != nil {
-		a.activity.begin(fmt.Sprintf("Slice %d/%d · %s · turn %d", min(a.state.Next+1, len(a.config.Slices)), len(a.config.Slices), phase, a.state.Turns), "worker.started")
+		label := fmt.Sprintf("Slice %d/%d · %s · turn %d", min(a.state.Next+1, len(a.config.Slices)), len(a.config.Slices), phase, a.state.Turns)
+		if a.activeGateRepair() != nil {
+			label = fmt.Sprintf("Final-gate repair %d/%d · %s · turn %d", len(a.state.GateRepairs), a.state.GateRepairPolicy.MaxRepairs, phase, a.state.Turns)
+		}
+		a.activity.begin(label, "worker.started")
 		defer a.activity.end()
 	}
 	scanner := bufio.NewScanner(stdout)

@@ -52,23 +52,27 @@ type mergeRecord struct {
 }
 
 type pendingMerge struct {
-	PR   int    `json:"pr"`
-	Head string `json:"head"`
+	PR         int    `json:"pr"`
+	Head       string `json:"head"`
+	GateRepair bool   `json:"gate_repair,omitempty"`
 }
 
 type state struct {
-	ConfigHash  string        `json:"config_hash"`
-	Status      string        `json:"status"`
-	Next        int           `json:"next_slice_index"`
-	Session     string        `json:"session,omitempty"`
-	Turns       int           `json:"worker_turns"`
-	Stalled     int           `json:"stalled_turns"`
-	Fingerprint string        `json:"last_fingerprint,omitempty"`
-	Feedback    string        `json:"feedback,omitempty"`
-	Pending     *pendingMerge `json:"pending_merge,omitempty"`
-	Merged      []mergeRecord `json:"merged"`
-	Gate        *evidence     `json:"gate,omitempty"`
-	Blocker     *runBlocker   `json:"blocker,omitempty"`
+	ConfigHash       string            `json:"config_hash"`
+	Status           string            `json:"status"`
+	Next             int               `json:"next_slice_index"`
+	Session          string            `json:"session,omitempty"`
+	Turns            int               `json:"worker_turns"`
+	Stalled          int               `json:"stalled_turns"`
+	Fingerprint      string            `json:"last_fingerprint,omitempty"`
+	Feedback         string            `json:"feedback,omitempty"`
+	Pending          *pendingMerge     `json:"pending_merge,omitempty"`
+	Merged           []mergeRecord     `json:"merged"`
+	Gate             *evidence         `json:"gate,omitempty"`
+	Blocker          *runBlocker       `json:"blocker,omitempty"`
+	GateRepairPolicy *gateRepairPolicy `json:"gate_repair_policy,omitempty"`
+	GateFailure      *gateFailure      `json:"gate_failure,omitempty"`
+	GateRepairs      []gateRepair      `json:"gate_repairs,omitempty"`
 }
 
 type app struct {
@@ -129,6 +133,9 @@ func loadApp(path string) (*app, error) {
 	}
 	if a.state.Next < 0 || a.state.Next > len(c.Slices) || len(a.state.Merged) != a.state.Next {
 		return nil, errors.New("invalid checkpoint slice position")
+	}
+	if err := a.verifyGateRepairState(); err != nil {
+		return nil, err
 	}
 	return a, nil
 }

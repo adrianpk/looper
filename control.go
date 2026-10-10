@@ -83,12 +83,27 @@ func (a *app) run() error {
 			return a.closeSet()
 		}
 		s := a.config.Slices[a.state.Next]
+		if err := a.deliverPR(s, "implement", "repair"); err != nil {
+			return err
+		}
+	}
+}
+
+// Both slice delivery and authorized gate repairs use the same exact-HEAD merge path.
+func (a *app) deliverPR(s slice, implementPhase, repairPhase string) error {
+	for {
+		if err := a.fetch(); err != nil {
+			return err
+		}
+		if err := a.verifyIdentity(); err != nil {
+			return err
+		}
 		p, err := a.discover(s)
 		if err != nil {
 			return err
 		}
 		if p == nil {
-			if err := a.work("implement", fmt.Sprintf("Implement Slice %d of %d and prepare its canonical PR. %s", s.Number, len(a.config.Slices), a.state.Feedback)); err != nil {
+			if err := a.work(implementPhase, fmt.Sprintf("Prepare canonical PR %q on branch %s, using the existing Slice %d report %s. %s", s.Title, s.Branch, s.Number, s.Report, a.state.Feedback)); err != nil {
 				return err
 			}
 			continue
@@ -99,40 +114,41 @@ func (a *app) run() error {
 		}
 		p = &pinned
 		if p.Merged {
-			if _, err := a.checkPR(s, *p); err != nil {
+			if _, err := a.checkDeliveryPR(s, *p); err != nil {
 				return fmt.Errorf("already-merged PR fails the contract: %w", err)
 			}
-			if err := a.acceptMerge(*p); err != nil {
-				return err
-			}
-			continue
+			return a.acceptMerge(*p)
 		}
 		if p.State != "open" {
 			return fmt.Errorf("PR #%d closed without merge", p.Number)
 		}
-		parsed, err := a.checkPR(s, *p)
+		parsed, err := a.checkDeliveryPR(s, *p)
 		if err != nil {
-			if err := a.work("repair", fmt.Sprintf("Repair PR #%d without changing slice scope: %s", p.Number, err)); err != nil {
+			if err := a.work(repairPhase, fmt.Sprintf("Repair PR #%d without changing approved scope: %s", p.Number, err)); err != nil {
 				return err
 			}
 			continue
 		}
 		if !p.Mergeable {
-			if err := a.work("repair", fmt.Sprintf("PR #%d is not currently mergeable. Resolve the concrete integration condition within the approved slice; do not force-push without existing authorization.", p.Number)); err != nil {
+			if err := a.work(repairPhase, fmt.Sprintf("PR #%d is not currently mergeable. Resolve the concrete integration condition within the approved scope; do not force-push without existing authorization.", p.Number)); err != nil {
 				return err
 			}
 			continue
 		}
 		worktree, err := a.findWorktree(p.Head.SHA, s.Branch)
 		if err != nil {
-			if err := a.work("repair", err.Error()); err != nil {
+			if err := a.work(repairPhase, err.Error()); err != nil {
 				return err
 			}
 			continue
 		}
-		a.printf(activityRunning, "Slice %d/%d: checking PR #%d and exact-HEAD validation evidence.\n", s.Number, len(a.config.Slices), p.Number)
+		if a.activeGateRepair() != nil {
+			a.printf(activityRunning, "Final-gate repair: checking PR #%d and exact-HEAD validation evidence.\n", p.Number)
+		} else {
+			a.printf(activityRunning, "Slice %d/%d: checking PR #%d and exact-HEAD validation evidence.\n", s.Number, len(a.config.Slices), p.Number)
+		}
 		if err := a.ensureValidation(worktree, parsed.Commands); err != nil {
-			if err := a.work("repair", fmt.Sprintf("Required validation failed: %s. Correct only the active slice and regenerate its PR/evidence.", err)); err != nil {
+			if err := a.work(repairPhase, fmt.Sprintf("Required validation failed: %s. Correct only the active approved unit and regenerate its PR/evidence.", err)); err != nil {
 				return err
 			}
 			continue
@@ -145,17 +161,17 @@ func (a *app) run() error {
 			a.state.Feedback = "PR changed during verification; restart canonical checks"
 			continue
 		}
-		if _, err := a.checkPR(s, current); err != nil {
+		if _, err := a.checkDeliveryPR(s, current); err != nil {
 			return err
 		}
 		if !current.Mergeable || current.Draft {
-			if err := a.work("repair", "PR mergeability or draft state changed during verification; restore the approved handoff"); err != nil {
+			if err := a.work(repairPhase, "PR mergeability or draft state changed during verification; restore the approved handoff"); err != nil {
 				return err
 			}
 			continue
 		}
 		if err := a.syncDev(); err != nil {
-			if err := a.work("repair", err.Error()); err != nil {
+			if err := a.work(repairPhase, err.Error()); err != nil {
 				return err
 			}
 			continue
@@ -165,27 +181,25 @@ func (a *app) run() error {
 			return err
 		}
 		if dev != current.Base.SHA {
-			if err := a.work("repair", "dev advanced during validation; refresh the PR and its exact-HEAD evidence before integration"); err != nil {
+			if err := a.work(repairPhase, "dev advanced during validation; refresh the PR and its exact-HEAD evidence before integration"); err != nil {
 				return err
 			}
 			continue
 		}
 		if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", dev, current.Head.SHA); err != nil {
-			if err := a.work("repair", "The candidate does not include current dev. Integrate dev under the existing authorization and regenerate exact-HEAD checks. The controller will not merge an untested rebased tree."); err != nil {
+			if err := a.work(repairPhase, "The candidate does not include current dev. Integrate dev under the existing authorization and regenerate exact-HEAD checks. The controller will not merge an untested rebased tree."); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := a.merge(current); err != nil {
-			return err
-		}
+		return a.merge(current)
 	}
 }
 
 func (a *app) merge(p pullRequest) error {
 	a.printf(activitySuccess, "PR ready: %s\n", p.HTMLURL)
 	a.printf(activityRunning, "Merging Rebase + Fast-forward into dev.\n")
-	a.state.Pending = &pendingMerge{PR: p.Number, Head: p.Head.SHA}
+	a.state.Pending = &pendingMerge{PR: p.Number, Head: p.Head.SHA, GateRepair: a.activeGateRepair() != nil}
 	if err := a.save(); err != nil {
 		return err
 	}
@@ -212,10 +226,11 @@ func (a *app) reconcile() error {
 	if p.Head.SHA != a.state.Pending.Head {
 		return errors.New("merged PR head differs from the submitted exact head")
 	}
-	if a.state.Next >= len(a.config.Slices) {
-		return errors.New("pending merge has no current slice")
+	identity, err := a.pendingIdentity()
+	if err != nil {
+		return err
 	}
-	if _, err := a.checkPR(a.config.Slices[a.state.Next], p); err != nil {
+	if _, err := a.checkDeliveryPR(identity, p); err != nil {
 		return err
 	}
 	return a.acceptMerge(p)
@@ -231,10 +246,20 @@ func (a *app) acceptMerge(p pullRequest) error {
 	if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", p.MergedCommit, "origin/dev"); err != nil {
 		return errors.New("canonical merged commit is not integrated in origin/dev")
 	}
-	a.state.Merged = append(a.state.Merged, mergeRecord{PR: p.Number, Head: p.Head.SHA, MergedCommit: p.MergedCommit})
-	a.state.Next++
+	record := mergeRecord{PR: p.Number, Head: p.Head.SHA, MergedCommit: p.MergedCommit}
+	isRepair := a.activeGateRepair() != nil
+	if repair := a.activeGateRepair(); repair != nil {
+		repair.Merge = &record
+		a.state.GateFailure = nil
+	} else {
+		a.state.Merged = append(a.state.Merged, record)
+		a.state.Next++
+	}
 	a.state.Pending = nil
 	a.state.Feedback = fmt.Sprintf("PR #%d merged into dev. Close its report/tracker entries and activate the next recorded slice.", p.Number)
+	if isRepair {
+		a.state.Feedback = fmt.Sprintf("Final-gate repair PR #%d integrated. Prepare the corrected composition for the unchanged full gate; do not start another delivery set.", p.Number)
+	}
 	a.state.Stalled = 0
 	if err := a.save(); err != nil {
 		return err
@@ -245,11 +270,28 @@ func (a *app) acceptMerge(p pullRequest) error {
 	if err := a.syncDev(); err != nil {
 		return err
 	}
-	a.printf(activitySuccess, "Slice %d/%d integrated in dev.\n", a.state.Next, len(a.config.Slices))
+	if isRepair {
+		a.printf(activitySuccess, "Final-gate repair PR #%d integrated in dev.\n", p.Number)
+	} else {
+		a.printf(activitySuccess, "Slice %d/%d integrated in dev.\n", a.state.Next, len(a.config.Slices))
+	}
 	return nil
 }
 
 func (a *app) recordMerges() error {
+	for i := range a.state.GateRepairs {
+		r := a.state.GateRepairs[i].Merge
+		if r == nil || r.Recorded {
+			continue
+		}
+		if _, err := command(a.config.Repo, "acta", "record", "pull-request", "--forge", a.config.Forge, "--repository", a.config.Repository, "--number", fmt.Sprint(r.PR), "--action", "merged", "--source", "integration", fmt.Sprintf("Authorized final-gate repair %d merged into dev at %s.", i+1, r.MergedCommit)); err != nil {
+			return fmt.Errorf("repair merge confirmed; activity recording failed: %w", err)
+		}
+		r.Recorded = true
+		if err := a.save(); err != nil {
+			return err
+		}
+	}
 	for i := range a.state.Merged {
 		r := &a.state.Merged[i]
 		if r.Recorded {
@@ -425,7 +467,23 @@ func (a *app) closeSet() error {
 	if err := a.syncDev(); err != nil {
 		return err
 	}
-	if a.state.Gate == nil {
+	// Runs without delegated repair authority retain their explicit manual retry workflow.
+	if a.state.GateFailure != nil && a.state.GateRepairPolicy == nil {
+		a.state.GateFailure = nil
+		if err := a.save(); err != nil {
+			return err
+		}
+	}
+	for a.state.Gate == nil {
+		if a.state.GateFailure != nil {
+			if err := a.prepareGateRepair(); err != nil {
+				return err
+			}
+			if err := a.deliverPR(a.activeGateRepair().Identity, "repair_gate", "repair_gate"); err != nil {
+				return err
+			}
+			continue
+		}
 		for {
 			if err := a.work("prepare_gate", "All recorded slices are integrated. Close delivered slice entries, prepare the approved full-gate prerequisites, leave primary dev clean and pushed, and return ready_for_gate. Do not run the full gate: the controller owns it."); err != nil {
 				return err
@@ -446,7 +504,18 @@ func (a *app) closeSet() error {
 		}
 		a.printf(activityRunning, "All slices integrated. Running the configured full gate on clean dev %s\n", head)
 		if err := a.validate(a.config.Repo, []string{a.config.FullGate}); err != nil {
-			return fmt.Errorf("full gate failed; do not close the set: %w", err)
+			var failure *executionFailure
+			if !errors.As(err, &failure) || failure.Blocker.Class != "validation" {
+				return err
+			}
+			a.state.GateFailure = &gateFailure{Head: head, Message: err.Error()}
+			if saveErr := a.save(); saveErr != nil {
+				return errors.Join(err, saveErr)
+			}
+			if a.state.GateRepairPolicy == nil {
+				return fmt.Errorf("full gate failed; do not close the set: %w", err)
+			}
+			continue
 		}
 		var e evidence
 		if err := readJSON(a.evidencePath(head), &e); err != nil {
@@ -515,6 +584,22 @@ func (a *app) finished() error {
 	if err := a.verifyClosureDiff(); err != nil {
 		return err
 	}
+	for _, repair := range a.state.GateRepairs {
+		if repair.Merge == nil {
+			return errors.New("gate repair is not integrated")
+		}
+		r := repair.Merge
+		p, err := a.pull(r.PR)
+		if err != nil {
+			return err
+		}
+		if !p.Merged || p.Head.SHA != r.Head || p.MergedCommit != r.MergedCommit {
+			return errors.New("gate repair merge no longer matches canonical state")
+		}
+		if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", r.MergedCommit, "origin/dev"); err != nil {
+			return err
+		}
+	}
 	for i, r := range a.state.Merged {
 		p, err := a.pull(r.PR)
 		if err != nil {
@@ -556,7 +641,11 @@ func hasStatus(doc, status string) bool {
 }
 
 func (a *app) fingerprint() (string, error) {
-	p, err := a.discover(a.config.Slices[min(a.state.Next, len(a.config.Slices)-1)])
+	identity := a.config.Slices[min(a.state.Next, len(a.config.Slices)-1)]
+	if repair := a.activeGateRepair(); repair != nil {
+		identity = repair.Identity
+	}
+	p, err := a.discover(identity)
 	if err != nil {
 		return "", err
 	}

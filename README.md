@@ -1336,6 +1336,49 @@ slice identity needs a newly approved configuration; Looper does not invent
 replacement slices. Delivery ends at `dev`: main integration, tagging, release,
 publication and deployment require their own workflow and authority.
 
+### Authorized final-gate repairs
+
+A maintainer may delegate bounded repairs of defects in the approved set after
+all configured slices are integrated. Pin this authority once on an inactive
+run; the frozen configuration, slice history, conversation and worker budgets
+remain unchanged:
+
+```sh
+looper authorize-gate-repairs --config /path/to/set.json --policy /path/to/repairs.json
+looper resume --config /path/to/set.json --detach --activity --json
+```
+
+Example policy (repository-relative paths):
+
+```json
+{
+  "branch_prefix": "fix/flow-gate",
+  "title": "fix(gate): correct flow acceptance",
+  "report_slice": 1,
+  "max_repairs": 3,
+  "allowed_paths": ["src/flow", "tests/flow", "ops/default/report/slice-1.md"],
+  "required_commands": ["make flow-regression-test"]
+}
+```
+
+The controller records each failed candidate and pins repair branches such as
+`fix/flow-gate-1` and exact titles such as
+`fix(gate): correct flow acceptance (attempt 1)`. Repairs reuse the indicated
+existing slice report and canonical PR body. Scope is constrained by the
+approved plan and the policy's path allowlist. The worker diagnoses and fixes;
+the controller verifies the PR, runs focused exact-HEAD checks, reconciles the
+merge outcome and reruns the unchanged full gate on the integrated candidate.
+Repair PRs are tracked separately; they do not create new numbered slices.
+
+For an already blocked pre-upgrade run, add `--failed-head FULL_SHA` to the
+authorization command. Adoption requires that exact clean primary HEAD, a
+matching validation blocker and retained diagnostics for the configured gate.
+It avoids rerunning a known failed candidate merely to trigger its repair.
+Authority cannot be replaced or widened after it is pinned. Repair count,
+worker-turn and stalled-progress limits still apply; external blockers and
+uncertain merges still stop for inspection. No successful gate is inferred
+from a repair or its focused tests. Completion still requires the full gate.
+
 ## Recovery and blockers
 
 The normal recovery entrypoint is project-local:

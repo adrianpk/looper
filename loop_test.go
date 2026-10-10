@@ -84,7 +84,7 @@ func fixtureCommand(tool string, args []string) error {
 				return fmt.Errorf("invalid merge request: %s", payload)
 			}
 			f.Merges++
-			if f.Mode == "unknown-merge" {
+			if f.Mode == "unknown-merge" || f.Mode == "gate-unknown-merge" && strings.HasPrefix(f.PR.Head.Ref, "fix/gate-") {
 				if err := save(); err != nil {
 					return err
 				}
@@ -96,10 +96,13 @@ func fixtureCommand(tool string, args []string) error {
 			f.PR.Merged = true
 			f.PR.State = "closed"
 			f.PR.MergedCommit = f.PR.Head.SHA
+			if strings.HasPrefix(f.PR.Head.Ref, "fix/gate-") {
+				f.PR.Base.SHA = f.PR.Head.SHA
+			}
 			if err := save(); err != nil {
 				return err
 			}
-			if f.Mode == "lost-response" {
+			if f.Mode == "lost-response" || f.Mode == "gate-lost-response" && strings.HasPrefix(f.PR.Head.Ref, "fix/gate-") {
 				return fmt.Errorf("response lost after merge")
 			}
 			return nil
@@ -201,9 +204,11 @@ func fixtureCommand(tool string, args []string) error {
 		}
 		prompt := string(input)
 		phase := ""
+		configPath := ""
 		var cfg config
 		for _, line := range strings.Split(prompt, "\n") {
 			if path, ok := strings.CutPrefix(line, "Configuration: "); ok {
+				configPath = path
 				if err := readJSON(path, &cfg); err != nil {
 					return err
 				}
@@ -278,14 +283,75 @@ func fixtureCommand(tool string, args []string) error {
 				}
 				f.PR.Body = strings.Split(f.PR.Body, "\n\n## Improvised")[0]
 				result.Status = "pr_ready"
+			case "repair_gate":
+				f.Repairs++
+				if f.Mode == "gate-blocked" {
+					result = workerResult{Status: "blocked", Message: "Correction requires an external decision"}
+					break
+				}
+				if f.Mode == "gate-stalled" {
+					break
+				}
+				a, err := loadApp(configPath)
+				if err != nil {
+					return err
+				}
+				r := a.activeGateRepair()
+				if r == nil {
+					return fmt.Errorf("repair worker has no pinned identity")
+				}
+				if f.PR != nil && !f.PR.Merged {
+					return fmt.Errorf("fixture cannot repair an existing PR")
+				}
+				f.History = append(f.History, *f.PR)
+				if _, err := git(f.Worktree, "switch", "-c", r.Identity.Branch, "origin/dev"); err != nil {
+					return err
+				}
+				if err := os.WriteFile(filepath.Join(f.Worktree, "runtime.txt"), []byte("repaired\n"+r.Identity.Branch+"\n"), 0600); err != nil {
+					return err
+				}
+				if f.Mode == "gate-unauthorized" {
+					if err := os.WriteFile(filepath.Join(f.Worktree, "unrelated.txt"), []byte("outside repair authority\n"), 0600); err != nil {
+						return err
+					}
+				}
+				if err := fixtureCommit(f.Worktree, "fix: correct gate regression", false); err != nil {
+					return err
+				}
+				head, err := cleanHead(f.Worktree)
+				if err != nil {
+					return err
+				}
+				base, err := git(f.Repo, "rev-parse", "origin/dev")
+				if err != nil {
+					return err
+				}
+				intro, err := git(f.Worktree, "log", "--diff-filter=A", "--format=%H", "--", r.Identity.Report)
+				if err != nil {
+					return err
+				}
+				p := *f.PR
+				p.Number = len(f.History) + 1
+				p.Title = r.Identity.Title
+				p.HTMLURL = fmt.Sprintf("https://forge.example.org/team/app/pulls/%d", p.Number)
+				p.Head.Ref, p.Head.SHA, p.Base.SHA = r.Identity.Branch, head, base
+				p.Merged, p.MergedCommit, p.State = false, "", "open"
+				p.Body = strings.Replace(canonicalBody(), strings.Repeat("a", 40), intro, 1)
+				p.Body = strings.Replace(p.Body, "go test ./...", "test -f runtime.txt", 1)
+				f.PR = &p
+				result.Status = "pr_ready"
 			case "prepare_gate":
 				f.Prepare++
 				if f.Prepare%2 == 1 {
 					if err := os.WriteFile(filepath.Join(f.Repo, cfg.Slices[0].Report), []byte("Status: delivered\n"), 0600); err != nil {
 						return err
 					}
-					if err := fixtureCommit(f.Repo, "docs: deliver slice", true); err != nil {
+					if status, err := git(f.Repo, "status", "--porcelain"); err != nil {
 						return err
+					} else if status != "" {
+						if err := fixtureCommit(f.Repo, "docs: deliver slice", true); err != nil {
+							return err
+						}
 					}
 				} else {
 					result.Status = "ready_for_gate"

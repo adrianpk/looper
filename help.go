@@ -60,6 +60,10 @@ Commands:
             Execute the exact ordered checks and save evidence for the clean HEAD.
   recover   --config FILE --retry-unmerged
             Clear an uncertain merge intent only after confirming it did not apply.
+  authorize-gate-repairs --config FILE --policy FILE [--failed-head SHA]
+            Pin bounded final-gate repair PR authority on an inactive completed-slice run.
+            Preserve the frozen configuration, conversation, counters and history; start no worker.
+            --failed-head adopts matching retained diagnostics from a pre-upgrade blocked run.
   version   Print the controller version.
 
 Agent workflow using the preferred defaults:
@@ -139,6 +143,9 @@ Only run and resume execute the approved delivery set and perform its delegated 
 init/register/list/status/watch/check do not execute worker turns or submit merges.
 run/resume merge canonical PRs with Rebase + Fast-forward into dev and require
 the configured full gate and closure evidence before completion. Neither broadens authority.
+Final-gate failures remain blocked unless bounded repair PR authority was explicitly pinned.
+Authorized repairs use the same exact-HEAD validation and controller-owned merge path,
+then rerun the unchanged full gate. They never add slices or reset worker budgets.
 `, version, backendAuto, defaultOutput, defaultColor)
 	return err
 }

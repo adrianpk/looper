@@ -6,6 +6,9 @@ Notable changes to Looper are documented here.
 
 ### Added
 
+- Final-gate failures can trigger scoped repair PRs and automatic revalidation
+  after explicit, bounded authorization with `authorize-gate-repairs`.
+  Existing runs retain their conversation, slice history and worker budgets.
 - Optional agent skills prepare specifications, plans, trackers and tickets
   from requests or existing artifacts, and guide operation of approved loops.
 - Explicit sequential delivery with `resume --then FILE`. Each approved set
