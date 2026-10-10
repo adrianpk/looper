@@ -93,6 +93,8 @@ func executeAgent(args []string) error {
 	output := fs.String("output", string(defaultOutput), "stream output: jsonl, human")
 	session := fs.String("session", "", "internal terminal session")
 	launchID := fs.String("launch", "", "internal launch identity")
+	var successors configPaths
+	fs.Var(&successors, "then", "explicitly approved successor config; repeat in order")
 	failure := func(code, message string, exit int, candidates []runInfo) error {
 		// Detect --json even when parsing stopped before reaching it.
 		jsonOutput := *machine
@@ -122,6 +124,9 @@ func executeAgent(args []string) error {
 	}
 	if fs.NArg() != 0 || (*detach && args[0] != "resume") || (*activity && args[0] != "resume" && args[0] != "_resume-detached") {
 		return failure("invalid_arguments", "Unexpected arguments or flags for this command", 2, nil)
+	}
+	if len(successors) != 0 && args[0] != "resume" {
+		return failure("invalid_arguments", "--then belongs to resume", 2, nil)
 	}
 	if args[0] == "_resume-detached" {
 		if *config == "" || *session == "" || *launchID == "" {
@@ -251,6 +256,9 @@ func executeAgent(args []string) error {
 		if r.Blocker != nil {
 			out.printf(activityFailure, "%s: %s\n", r.Blocker.Code, r.Blocker.Message)
 		}
+		if r.Sequence != nil {
+			fmt.Printf("Sequence: %d/%d completed · %s · current %s · %d/%d slices integrated\n", r.Sequence.Completed, r.Sequence.Total, r.Sequence.Phase, filepath.Base(r.Sequence.Current), r.Sequence.CompletedSlices, r.Sequence.TotalSlices)
+		}
 		if r.ViewCommand != "" {
 			fmt.Println(r.ViewCommand)
 		}
@@ -273,6 +281,9 @@ func executeAgent(args []string) error {
 		return respond("registered")
 	}
 	if r.Status == "running" || r.Status == "starting" {
+		if len(successors) != 0 {
+			return failure("sequence_active", "An active execution cannot accept a changed continuation list", 4, nil)
+		}
 		return respond("already_running")
 	}
 	if r.Blocker != nil && !r.Blocker.Retryable {
@@ -290,6 +301,11 @@ func executeAgent(args []string) error {
 			return &agentError{JSON: *machine, Exit: 4, Response: agentResponse{SchemaVersion: 1, Status: "blocked", Run: &r, Error: b}}
 		}
 	}
+	if len(successors) != 0 {
+		if err := prepareSequence(a, successors); err != nil {
+			return failure("sequence_blocked", err.Error(), 4, nil)
+		}
+	}
 	if !*detach {
 		return runController(a, controllerOptions{Activity: *activity, Color: colorMode(*color), Output: outputFormat(*output)})
 	}
@@ -297,10 +313,22 @@ func executeAgent(args []string) error {
 	r = inspectRun(r.runEntry)
 	if err != nil {
 		b := &runBlocker{Code: "launch_failed", Message: err.Error(), Retryable: true, NextAction: commandAction("looper", "status", "--run", r.ID, "--json")}
+		var access *executionFailure
+		if errors.As(err, &access) {
+			b = &access.Blocker
+		}
 		var unavailable *backendError
 		if errors.As(err, &unavailable) {
 			b.Code, b.Retryable, b.NextAction = "backend_unavailable", false, inspectAction("check_backend", *backend)
+			b.Component, b.Class = "launcher", "configuration"
 		}
+		if b.Component == "" {
+			b.Component, b.Class = "launcher", "execution"
+		}
+		if saveErr := blockSequenceLaunch(a, b); saveErr != nil {
+			return failure("sequence_checkpoint_failed", saveErr.Error(), 5, nil)
+		}
+		r = inspectRun(r.runEntry)
 		return &agentError{JSON: *machine, Exit: 5, Response: agentResponse{SchemaVersion: 1, Status: "blocked", Run: &r, Error: b}}
 	}
 	return respond(status)
@@ -327,6 +355,7 @@ type launchReady struct {
 	Status     string           `json:"status"`
 	Error      string           `json:"error,omitempty"`
 	Controller *processIdentity `json:"controller,omitempty"`
+	Blocker    *runBlocker      `json:"blocker,omitempty"`
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
@@ -415,6 +444,9 @@ func launchDetached(a *app, activity bool, requested string, color colorMode, ou
 		var ready launchReady
 		if err := readJSON(filepath.Join(a.dir, "launch-ready.json"), &ready); err == nil && ready.ID == id {
 			if ready.Status != "started" {
+				if ready.Blocker != nil {
+					return "", &executionFailure{Blocker: *ready.Blocker}
+				}
 				return "", errors.New(ready.Error)
 			}
 			return "started", nil

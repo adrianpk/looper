@@ -56,7 +56,11 @@ func selectBackend(requested string) (string, error) {
 }
 
 func probeBackend(name string) error {
-	if _, err := exec.LookPath(name); err != nil {
+	env, err := executionEnvironment()
+	if err != nil {
+		return err
+	}
+	if _, err := resolveExecutable(name, env); err != nil {
 		return err
 	}
 	if name == "tmux" {
@@ -68,8 +72,10 @@ func probeBackend(name string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	c := exec.CommandContext(ctx, name, args...)
-	c.Env = terminalEnvironment()
+	c, err := executionCommand(ctx, "", name, args...)
+	if err != nil {
+		return err
+	}
 	value, err := commandOutput(c)
 	if err != nil {
 		return err
@@ -103,8 +109,10 @@ func (t *terminalRef) command(dir string, args ...string) (string, error) {
 	if t.Backend == "herdr" {
 		args = append([]string{"--session", t.Session}, args...)
 	}
-	c := exec.Command(t.Backend, args...)
-	c.Dir, c.Env = dir, terminalEnvironment()
+	c, err := executionCommand(context.Background(), dir, t.Backend, args...)
+	if err != nil {
+		return "", err
+	}
 	return commandOutput(c)
 }
 
@@ -169,8 +177,10 @@ func (t *terminalRef) prepareHerdr(a *app) error {
 		return err
 	}
 	if !status.Server.Running {
-		c := exec.Command("herdr", "--session", t.Session, "server")
-		c.Dir, c.Env = a.config.Repo, terminalEnvironment()
+		c, err := executionCommand(context.Background(), a.config.Repo, "herdr", "--session", t.Session, "server")
+		if err != nil {
+			return err
+		}
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := c.Start(); err != nil {
 			return err
@@ -199,10 +209,12 @@ func (t *terminalRef) prepareHerdr(a *app) error {
 	}
 	t.Socket = status.Server.Socket
 	args := []string{"workspace", "create", "--cwd", a.config.Repo, "--label", t.Session, "--no-focus"}
-	for _, key := range []string{"PATH", "CODEX_HOME", "XDG_STATE_HOME", "NO_COLOR"} {
-		if value, ok := os.LookupEnv(key); ok {
-			args = append(args, "--env", key+"="+value)
-		}
+	env, err := launchEnvironment()
+	if err != nil {
+		return err
+	}
+	for _, item := range env {
+		args = append(args, "--env", item)
 	}
 	value, err := t.command(a.config.Repo, args...)
 	if err != nil {
@@ -258,16 +270,28 @@ func (t *terminalRef) prepareHerdr(a *app) error {
 }
 
 func (t *terminalRef) start(a *app, argv []string) error {
+	env, err := launchEnvironment()
+	if err != nil {
+		return err
+	}
 	quoted := make([]string, 0, len(argv))
 	for _, arg := range argv {
 		quoted = append(quoted, shellQuote(arg))
 	}
 	cmd := "exec " + strings.Join(quoted, " ")
-	var err error
 	switch t.Backend {
 	case "herdr":
 		_, err = t.command(a.config.Repo, "pane", "run", t.Pane, cmd)
 	case "zellij":
+		processEnv, envErr := executionEnvironment()
+		if envErr != nil {
+			return envErr
+		}
+		envExecutable, envErr := resolveExecutable("env", processEnv)
+		if envErr != nil {
+			return envErr
+		}
+		argv = append(append([]string{envExecutable}, env...), argv...)
 		value, listErr := t.command(a.config.Repo, "list-sessions", "--short", "--no-formatting")
 		if listErr != nil {
 			var exit *exec.ExitError
@@ -287,10 +311,8 @@ func (t *terminalRef) start(a *app, argv []string) error {
 		_, err = t.command(a.config.Repo, args...)
 	case "tmux":
 		args := []string{"-L", "slice-loop", "new-session", "-d", "-s", t.Session, "-c", a.config.Repo}
-		for _, key := range []string{"PATH", "CODEX_HOME", "XDG_STATE_HOME", "NO_COLOR"} {
-			if value, ok := os.LookupEnv(key); ok {
-				args = append(args, "-e", key+"="+value)
-			}
+		for _, item := range env {
+			args = append(args, "-e", item)
 		}
 		_, err = t.command(a.config.Repo, append(args, cmd)...)
 	default:

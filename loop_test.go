@@ -1,28 +1,32 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 type fixture struct {
-	Repo      string       `json:"repo"`
-	Worktree  string       `json:"worktree"`
-	Mode      string       `json:"mode"`
-	Calls     int          `json:"calls"`
-	Implement int          `json:"implement"`
-	Prepare   int          `json:"prepare"`
-	Repairs   int          `json:"repairs"`
-	Merges    int          `json:"merges"`
-	Closes    int          `json:"closes"`
-	PR        *pullRequest `json:"pr"`
+	Repo      string        `json:"repo"`
+	Worktree  string        `json:"worktree"`
+	Mode      string        `json:"mode"`
+	Calls     int           `json:"calls"`
+	Implement int           `json:"implement"`
+	Prepare   int           `json:"prepare"`
+	Repairs   int           `json:"repairs"`
+	Merges    int           `json:"merges"`
+	Closes    int           `json:"closes"`
+	PR        *pullRequest  `json:"pr"`
+	History   []pullRequest `json:"history,omitempty"`
 }
 
 func TestMain(m *testing.M) {
@@ -65,6 +69,12 @@ func fixtureCommand(tool string, args []string) error {
 				payload = args[i+1]
 			}
 		}
+		if method == "GET" && endpoint == "user" {
+			return printJSON(map[string]any{"id": 1})
+		}
+		if method == "GET" && endpoint == "repos/team/app" {
+			return printJSON(map[string]any{"allow_rebase": true, "permissions": map[string]bool{"push": true}})
+		}
 		if method == "POST" {
 			var body map[string]any
 			if err := json.Unmarshal([]byte(payload), &body); err != nil {
@@ -95,16 +105,82 @@ func fixtureCommand(tool string, args []string) error {
 			return nil
 		}
 		if strings.Contains(endpoint, "/pulls?") {
-			if f.PR == nil {
-				return printJSON([]pullRequest{})
+			parsed, _ := url.Parse(endpoint)
+			prs := []pullRequest{}
+			candidates := append([]pullRequest{}, f.History...)
+			if f.PR != nil {
+				candidates = append(candidates, *f.PR)
 			}
-			return printJSON([]pullRequest{*f.PR})
+			for _, p := range candidates {
+				if p.Head.Ref == parsed.Query().Get("head") {
+					prs = append(prs, p)
+				}
+			}
+			return printJSON(prs)
 		}
 		if strings.Contains(endpoint, "/pulls/") {
+			number, _ := strconv.Atoi(filepath.Base(endpoint))
+			for _, p := range f.History {
+				if p.Number == number {
+					return printJSON(p)
+				}
+			}
 			return printJSON(f.PR)
 		}
 		return fmt.Errorf("unexpected fixture endpoint")
 	case "codex":
+		if len(args) != 0 && args[0] == "app-server" {
+			if strings.Join(args, " ") != "app-server --listen stdio://" {
+				return fmt.Errorf("unexpected provider probe arguments")
+			}
+			scanner := bufio.NewScanner(os.Stdin)
+			methods := []string{"initialize", "initialized", "account/read", "account/rateLimits/read"}
+			for _, method := range methods {
+				if !scanner.Scan() {
+					return fmt.Errorf("provider probe closed before %s", method)
+				}
+				var request struct {
+					ID     int    `json:"id"`
+					Method string `json:"method"`
+				}
+				if err := json.Unmarshal(scanner.Bytes(), &request); err != nil || request.Method != method {
+					return fmt.Errorf("unexpected provider RPC; expected %s", method)
+				}
+				if method == "initialized" {
+					continue
+				}
+				result := map[string]any{}
+				if method == "account/read" {
+					result["account"] = map[string]string{"type": "chatgpt"}
+					if f.Mode == "provider-api" {
+						result["account"] = map[string]string{"type": "apiKey"}
+					}
+					if f.Mode == "provider-missing" {
+						result["account"] = nil
+					}
+				}
+				if method == "account/rateLimits/read" {
+					result["rateLimits"] = map[string]any{"primary": map[string]int{"usedPercent": 10}}
+					if f.Mode == "provider-quota" {
+						result["rateLimits"] = map[string]any{"primary": map[string]int{"usedPercent": 100}}
+					}
+					if f.Mode == "provider-auth" || f.Mode == "provider-transient" {
+						message := "401 Unauthorized private-value"
+						if f.Mode == "provider-transient" {
+							message = "503 Service Unavailable private-value"
+						}
+						return json.NewEncoder(os.Stdout).Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": -32000, "message": message}})
+					}
+				}
+				if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"id": request.ID, "result": result}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if f.Mode == "worker-auth" {
+			return fmt.Errorf("401 Unauthorized token=private-value")
+		}
 		if f.Mode == "paused-worker" || f.Mode == "hold-only" {
 			if err := os.WriteFile(path+".entered", []byte("ready"), 0600); err != nil {
 				return err
@@ -125,7 +201,13 @@ func fixtureCommand(tool string, args []string) error {
 		}
 		prompt := string(input)
 		phase := ""
+		var cfg config
 		for _, line := range strings.Split(prompt, "\n") {
+			if path, ok := strings.CutPrefix(line, "Configuration: "); ok {
+				if err := readJSON(path, &cfg); err != nil {
+					return err
+				}
+			}
 			if strings.HasPrefix(line, "Phase: ") {
 				phase = strings.TrimPrefix(line, "Phase: ")
 			}
@@ -138,18 +220,23 @@ func fixtureCommand(tool string, args []string) error {
 			switch phase {
 			case "implement":
 				f.Implement++
-				if f.Implement == 1 {
-					if _, err := git(f.Repo, "worktree", "add", "-b", "feat/flow", f.Worktree); err != nil {
+				if f.Implement%2 == 1 {
+					if f.PR != nil {
+						f.History = append(f.History, *f.PR)
+						f.PR = nil
+						f.Worktree += "-next"
+					}
+					if _, err := git(f.Repo, "worktree", "add", "-b", cfg.Slices[0].Branch, f.Worktree); err != nil {
 						return err
 					}
-					if err := os.WriteFile(filepath.Join(f.Worktree, "runtime.txt"), []byte("delivered behavior\n"), 0600); err != nil {
+					if err := os.WriteFile(filepath.Join(f.Worktree, "runtime.txt"), []byte("delivered behavior: "+cfg.Slices[0].Branch+"\n"), 0600); err != nil {
 						return err
 					}
 					if err := fixtureCommit(f.Worktree, "feat: deliver behavior", false); err != nil {
 						return err
 					}
 				} else {
-					report := "ops/default/report/slice-1.md"
+					report := cfg.Slices[0].Report
 					if err := os.MkdirAll(filepath.Dir(filepath.Join(f.Worktree, report)), 0700); err != nil {
 						return err
 					}
@@ -167,9 +254,11 @@ func fixtureCommand(tool string, args []string) error {
 					if err != nil {
 						return err
 					}
-					p := pullRequest{Number: 1, Title: "feat(slice-1): deliver flow", Body: strings.Replace(canonicalBody(), strings.Repeat("a", 40), head, 1), HTMLURL: "https://forge.example.org/team/app/pulls/1", State: "open", Mergeable: true}
+					p := pullRequest{Number: len(f.History) + 1, Title: cfg.Slices[0].Title, Body: strings.Replace(canonicalBody(), strings.Repeat("a", 40), head, 1), HTMLURL: "https://forge.example.org/team/app/pulls/1", State: "open", Mergeable: true}
+					p.HTMLURL = fmt.Sprintf("https://forge.example.org/team/app/pulls/%d", p.Number)
+					p.Body = strings.ReplaceAll(p.Body, "ops/default/report/slice-1.md", cfg.Slices[0].Report)
 					p.Body = strings.Replace(p.Body, "go test ./...", "test -f runtime.txt", 1)
-					p.Head.Ref = "feat/flow"
+					p.Head.Ref = cfg.Slices[0].Branch
 					p.Head.SHA = head
 					p.Base.Ref = "dev"
 					p.Base.SHA = base
@@ -191,8 +280,8 @@ func fixtureCommand(tool string, args []string) error {
 				result.Status = "pr_ready"
 			case "prepare_gate":
 				f.Prepare++
-				if f.Prepare == 1 {
-					if err := os.WriteFile(filepath.Join(f.Repo, "ops/default/report/slice-1.md"), []byte("Status: delivered\n"), 0600); err != nil {
+				if f.Prepare%2 == 1 {
+					if err := os.WriteFile(filepath.Join(f.Repo, cfg.Slices[0].Report), []byte("Status: delivered\n"), 0600); err != nil {
 						return err
 					}
 					if err := fixtureCommit(f.Repo, "docs: deliver slice", true); err != nil {
@@ -203,7 +292,7 @@ func fixtureCommand(tool string, args []string) error {
 				}
 			case "close":
 				f.Closes++
-				for _, p := range []string{"ops/default/plan/flow.md", "ops/default/tracker/flow.md"} {
+				for _, p := range []string{cfg.Plan, cfg.Tracker} {
 					b, err := os.ReadFile(filepath.Join(f.Repo, p))
 					if err != nil {
 						return err
@@ -232,7 +321,13 @@ func fixtureCommand(tool string, args []string) error {
 		if err := save(); err != nil {
 			return err
 		}
-		fmt.Println(`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`)
+		session := cfg.Session
+		if session == "" {
+			session = "11111111-1111-4111-8111-111111111111"
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"type": "thread.started", "thread_id": session}); err != nil {
+			return err
+		}
 		fmt.Println(`{"type":"item.completed","item":{"id":"message","type":"agent_message","text":"Preparing the approved delivery."}}`)
 		fmt.Println(`{"type":"item.started","item":{"id":"command","type":"command_execution","command":"go test ./... token=private"}}`)
 		fmt.Println(`{"type":"item.completed","item":{"id":"command","type":"command_execution","command":"go test ./...","exit_code":0,"aggregated_output":"private output"}}`)
@@ -259,6 +354,13 @@ func fixtureCommit(repo, message string, push bool) error {
 func setupLoop(t *testing.T, mode string) (*app, string) {
 	t.Helper()
 	root := t.TempDir()
+	// Fixtures must never resolve synthetic conversations against the host daemon or credential store.
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	profile := filepath.Join(root, "host-context.json")
+	if err := writeJSON(profile, executionContext{Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOOPER_CONTEXT", profile)
 	repo := newGitFixture(t)
 	table := "| Slice | Short name | Exact branch | Expected PR title | Report |\n| --- | --- | --- | --- | --- |\n| Slice 1 | Flow | `feat/flow` | `feat(slice-1): deliver flow` | `ops/default/report/slice-1.md` |\n"
 	for _, p := range []string{"ops/default/plan/flow.md", "ops/default/tracker/flow.md"} {

@@ -56,7 +56,16 @@ func (a *app) api(method, endpoint string, body any, result any) error {
 	}
 	endpoint = strings.ReplaceAll(endpoint, "{owner}/{repo}", repository)
 	args = append(args, endpoint)
-	out, err := command(a.config.Repo, "tea", args...)
+	var out string
+	var err error
+	if method == "GET" {
+		out, err = accessCommand("forge", a.config.Repo, "tea", args...)
+	} else {
+		out, err = command(a.config.Repo, "tea", args...)
+		if err != nil {
+			err = classifyAccess("forge", err, 1)
+		}
+	}
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -52,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -128,6 +129,12 @@ func execute(args []string) error {
 	}
 	a.output = newOutput(os.Stdout, colorMode(*color))
 	switch args[0] {
+	case "preflight":
+		if err := a.preflight(); err != nil {
+			return err
+		}
+		fmt.Println("Execution prerequisites verified in this process context.")
+		return nil
 	case "status":
 		return printJSON(a.state)
 	case "check":
@@ -269,8 +276,10 @@ func (c *capture) Write(p []byte) (int, error) {
 }
 
 func command(dir, name string, args ...string) (string, error) {
-	c := exec.Command(name, args...)
-	c.Dir = dir
+	c, err := executionCommand(context.Background(), dir, name, args...)
+	if err != nil {
+		return "", err
+	}
 	return commandOutput(c)
 }
 

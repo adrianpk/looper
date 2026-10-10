@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -23,12 +23,18 @@ func (a *app) work(phase, task string) error {
 	if a.state.Turns >= a.config.MaxTurns {
 		return errors.New("worker turn limit reached; inspect the checkpoint before continuing")
 	}
+	if err := requireIdleWorker(a); err != nil {
+		return err
+	}
 	before, err := a.fingerprint()
 	if err != nil {
 		return err
 	}
 	if a.state.Stalled >= a.config.MaxStalled && before == a.state.Fingerprint {
 		return errors.New("worker progress limit reached; resolve the workspace blocker before continuing")
+	}
+	if err := a.preflight(); err != nil {
+		return err
 	}
 	if before != a.state.Fingerprint {
 		a.state.Stalled = 0
@@ -127,8 +133,10 @@ Return the required JSON status and a concise factual message. A response is not
 		args = append(args, a.state.Session)
 	}
 	args = append(args, "-")
-	child := exec.Command("codex", args...)
-	child.Dir = a.config.Repo
+	child, err := executionCommand(context.Background(), a.config.Repo, "codex", args...)
+	if err != nil {
+		return err
+	}
 	child.Stdin = strings.NewReader(prompt)
 	var diagnostic capture
 	diagnostic.limit = 4096
@@ -197,7 +205,11 @@ Return the required JSON status and a concise factual message. A response is not
 		return streamErr
 	}
 	if waitErr != nil {
-		return fmt.Errorf("Codex exited unsuccessfully; checkpoint retained: %w: %s", waitErr, strings.TrimSpace(diagnostic.b.String()))
+		failure := classifyAccess("worker", fmt.Errorf("%w: %s", waitErr, diagnostic.b.String()), 1)
+		if failure.Blocker.Class == "authentication" || failure.Blocker.Class == "transient" {
+			return failure
+		}
+		return contextFailure("worker", "execution", "Worker exited unsuccessfully; inspect the retained conversation and host Codex diagnostics", 1)
 	}
 	if a.state.Session == "" {
 		return errors.New("Codex supplied no persistent conversation ID; refusing to start another unrelated worker")

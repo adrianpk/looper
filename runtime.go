@@ -18,6 +18,8 @@ type processIdentity struct {
 }
 
 type runRuntime struct {
+	Phase       string          `json:"phase,omitempty"`
+	WorkerHome  string          `json:"worker_home,omitempty"`
 	Controller  processIdentity `json:"controller"`
 	Worker      processIdentity `json:"worker"`
 	TmuxSession string          `json:"tmux_session,omitempty"`
@@ -147,6 +149,13 @@ func workerIdle(a *app) error {
 	if err := readJSON(filepath.Join(a.dir, "runtime.json"), &runtime); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	home, err := workerHome()
+	if err != nil {
+		return err
+	}
+	if runtime.WorkerHome != "" && runtime.WorkerHome != home {
+		return contextFailure("context", "configuration", "Worker home changed; restore the original conversation and credential store before resuming", 1)
+	}
 	if alive, err := processState(runtime.Worker); err != nil {
 		return err
 	} else if alive {
@@ -186,6 +195,15 @@ func workerIdle(a *app) error {
 	return nil
 }
 
+func requireIdleWorker(a *app) error {
+	err := workerIdle(a)
+	var failure *executionFailure
+	if err != nil && !errors.As(err, &failure) {
+		return contextFailure("worker", "ownership", activityText(err.Error()), 1)
+	}
+	return err
+}
+
 type controllerOptions struct {
 	Activity bool
 	Color    colorMode
@@ -195,33 +213,72 @@ type controllerOptions struct {
 }
 
 func runController(a *app, options controllerOptions) (result error) {
+	entry, err := entryFor(a)
+	if err != nil {
+		return err
+	}
+	output := newStreamOutput(os.Stdout, options.Color, options.Output, entry.ID)
+	a.output = output
+	// The final outcome belongs to the whole loop, after set monitors and leases are released.
+	defer func() {
+		if a != nil && a.output != nil {
+			output = a.output
+		}
+		kind, message, style := "loop.completed", "Loop completed successfully.", activitySuccess
+		if result != nil {
+			reason := activityText(result.Error())
+			if reason == "" {
+				reason = "Execution stopped; inspect the checkpoint."
+			}
+			kind, message, style = "loop.failed", "Loop failed: "+reason, activityFailure
+		}
+		if options.Output == outputHuman {
+			message = "\n" + message + "\n"
+		}
+		output.emit(time.Now(), kind, "", message, style)
+		result = errors.Join(result, output.error())
+	}()
 	dir := a.dir
 	var owner *processIdentity
-	ready := func(err error) {
-		if options.LaunchID != "" {
+	acknowledged := false
+	ready := func(err error) error {
+		if options.LaunchID != "" && !acknowledged {
 			r := launchReady{ID: options.LaunchID, Status: "started", Controller: owner}
 			if err != nil {
 				r.Status, r.Error = "blocked", err.Error()
+				var failure *executionFailure
+				if errors.As(err, &failure) {
+					r.Blocker = &failure.Blocker
+				}
 			}
 			if writeErr := writeJSON(filepath.Join(dir, "launch-ready.json"), r); writeErr != nil {
 				result = errors.Join(result, writeErr)
 			}
 		}
+		acknowledged = true
+		return result
+	}
+	var parent sequenceOwner
+	if err := readJSON(filepath.Join(a.dir, "sequence-owner.json"), &parent); err == nil {
+		err := contextFailure("sequence", "ownership", "Resume the sequence entry instead of its successor", 1)
+		ready(err)
+		return err
+	} else if !errors.Is(err, os.ErrNotExist) {
+		ready(err)
+		return err
 	}
 	lease, err := acquireRun(a)
 	if err != nil {
+		err = contextFailure("controller", "ownership", "Repository or run ownership cannot be acquired", 1)
 		ready(err)
 		return errors.Join(result, err)
 	}
 	defer lease.close()
 	// Reload under the lock: a concurrently finishing owner may have advanced the checkpoint.
 	a, err = loadApp(a.path)
-	var entry runEntry
 	if err == nil {
-		err = workerIdle(a)
-	}
-	if err == nil {
-		entry, err = registerRun(a)
+		a.output = output
+		err = requireIdleWorker(a)
 	}
 	if err != nil {
 		ready(err)
@@ -233,35 +290,103 @@ func runController(a *app, options controllerOptions) (result error) {
 		return errors.Join(result, err)
 	}
 	owner = &identity
-	a.runtime = &runRuntime{Controller: identity, Terminal: options.Terminal}
-	if options.Terminal != nil && options.Terminal.Backend == "tmux" {
-		a.runtime.TmuxSession = options.Terminal.Session
-	}
-	a.output = newStreamOutput(os.Stdout, options.Color, options.Output, entry.ID)
 	// A closed log consumer must not terminate a controller while its worker or gate is active.
 	pipeSignals := make(chan os.Signal, 1)
 	signal.Notify(pipeSignals, syscall.SIGPIPE)
 	defer signal.Stop(pipeSignals)
-	if err := a.saveRuntime(); err != nil {
-		ready(err)
-		return errors.Join(result, err)
+	s, err := loadSequence(a)
+	if err == nil && s != nil {
+		err = claimSequence(a, s)
 	}
-	monitor, stop, err := startActivity(a.path, options.Activity, a.output)
+	if err == nil {
+		err = runOwnedSequence(a, s, options, identity, ready)
+	}
 	if err != nil {
 		ready(err)
-		return errors.Join(result, err)
+		if s != nil {
+			s.Phase = "blocked"
+			var failure *executionFailure
+			if errors.As(err, &failure) {
+				s.Blocker = &failure.Blocker
+			} else {
+				s.Blocker = &contextFailure("controller", "execution", "Execution stopped; inspect the current set checkpoint before resuming", 1).Blocker
+			}
+			err = errors.Join(err, s.save(a))
+		}
+	}
+	return errors.Join(result, err)
+}
+
+func runOwnedSet(root, a *app, options controllerOptions, identity processIdentity, ready func(error) error) (result error) {
+	if a.path != root.path {
+		l := &runLease{}
+		defer l.close()
+		if err := l.acquire(filepath.Join(a.dir, "run.lock")); err != nil {
+			return contextFailure("controller", "ownership", "Successor controller ownership cannot be acquired", 1)
+		}
+	}
+	if err := requireIdleWorker(a); err != nil {
+		return err
+	}
+	entry, err := registerRun(a)
+	if err != nil {
+		return err
+	}
+	home, err := workerHome()
+	if err != nil {
+		return err
+	}
+	a.runtime = &runRuntime{Phase: "preflight", WorkerHome: home, Controller: identity, Terminal: options.Terminal}
+	if options.Terminal != nil && options.Terminal.Backend == "tmux" {
+		a.runtime.TmuxSession = options.Terminal.Session
+	}
+	a.output = newStreamOutput(os.Stdout, options.Color, options.Output, entry.ID)
+	root.output = a.output
+	if err := a.saveRuntime(); err != nil {
+		return err
+	}
+	if a.path != root.path {
+		if err := writeJSON(filepath.Join(root.dir, "runtime.json"), a.runtime); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		if result != nil && a.state.Status != "complete" {
+			result = a.block(result)
+		}
+	}()
+	if err := a.preflight(); err != nil {
+		return err
+	}
+	if err := a.fetch(); err != nil {
+		return err
+	}
+	if err := a.verifyIdentity(); err != nil {
+		return err
+	}
+	a.runtime.Phase = "running"
+	if err := a.saveRuntime(); err != nil {
+		return err
+	}
+	if a.path != root.path {
+		if err := writeJSON(filepath.Join(root.dir, "runtime.json"), a.runtime); err != nil {
+			return err
+		}
+	}
+	a.state.Blocker = nil
+	monitor, stop, err := startActivity(a.path, options.Activity, a.output)
+	if err != nil {
+		return err
 	}
 	a.activity = monitor
 	defer stop()
-	ready(nil)
-	if result != nil {
-		return result
+	if err := ready(nil); err != nil {
+		return err
 	}
 	a.output.emit(time.Now(), "controller.started", "", "Controller started", activityRunning)
 	if err := a.run(); err != nil {
-		a.state.Status, a.state.Feedback = "blocked", err.Error()
 		a.output.emit(time.Now(), "controller.error", "", err.Error(), activityFailure)
-		return errors.Join(err, a.save(), a.output.error())
+		return err
 	}
 	a.output.emit(time.Now(), "controller.completed", "", "Controller completed", activitySuccess)
 	return a.output.error()

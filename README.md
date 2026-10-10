@@ -17,12 +17,13 @@ gate must pass on one clean candidate, and the approved operational documents
 must be closed. `run` and `resume` carry out those delegated merges. Approval of
 a plan and merge authority must already exist before starting them.
 
-This README is the complete project documentation. Start with `looper --help`
+This README describes the CLI and delivery contract. Start with `looper --help`
 for a capability reference that agents can read without a configuration.
 
 ## Contents
 
 - [Where Looper fits](#where-looper-fits)
+- [Agent skills](#agent-skills)
 - [Quick start](#quick-start)
 - [Requirements and installation](#requirements-and-installation)
 - [Operational structure](#operational-structure)
@@ -45,15 +46,59 @@ and [Chryso (CHR)](https://forge.adrianpk.com/adrianpk/chr), provided their plan
 and tracker follow [Looper's contract](#operational-structure). It has served as
 an occasional replacement for their execution workflows in specific contexts.
 
-Looper has no GUI or built-in workflow for task clarification, specification
-authoring or planning. The agent harness can prepare those artifacts, obtain
-approval, and then use Looper to execute, inspect and resume the approved
-delivery.
+Looper has no GUI. Its optional agent skills help the harness clarify work,
+write specifications, and prepare plans and tickets. The harness obtains
+approval, then uses Looper to execute, inspect and resume the approved delivery.
 
 For use cases that need more ergonomic operator tools or the complete workflow
 from initial intent through planning and execution, see KAL and Chryso. KAL
 provides guided task preparation and Telegram control. Chryso provides a TUI
 and an optional local Web UI for managing project artifacts and execution.
+
+## Agent skills
+
+The repository includes two optional skills under [`skills/`](skills/):
+
+| Skill | Purpose |
+| --- | --- |
+| [looper-prepare](skills/looper-prepare/SKILL.md) | Turn a request or existing artifacts into a spec, plan, tracker, and linked tickets. Includes optional dumps and clarification quizzes. |
+| [looper-operate](skills/looper-operate/SKILL.md) | Inspect, launch, watch, and recover approved deliveries while preserving their execution state. |
+
+They supplement the CLI. The harness conducts the conversation and writes the
+documents using the bundled instructions and templates. You can start at any
+stage; a clear request needs no dump or quiz. Existing tickets under
+`ops/<namespace>/ticket/` are reused and linked to their owning slices,
+regardless of who or what created them. Tickets do not need to come from a
+skill. Execution keeps the same explicit approved plan and tracker contract.
+
+Each skill is a self-contained [Agent Skills](https://agentskills.io/specification)
+folder. Copy the complete folders, including references and templates, into
+the directory your harness discovers. Common locations are:
+
+| Harness | User skills | Project skills |
+| --- | --- | --- |
+| [Codex](https://learn.chatgpt.com/docs/build-skills) | `~/.agents/skills/` | `.agents/skills/` |
+| [Claude Code](https://code.claude.com/docs/en/skills) | `~/.claude/skills/` | `.claude/skills/` |
+
+For example, from a Looper clone, choose your harness's destination:
+
+```sh
+skills_root="$HOME/.agents/skills"
+mkdir -p "$skills_root"
+cp -R -i skills/looper-prepare skills/looper-operate "$skills_root/"
+```
+
+For another harness, use its skill import mechanism or skills directory. Review
+an existing installation before replacing it, and follow the harness's reload
+procedure. You can also ask the harness to read a skill's `SKILL.md` by path.
+Copying skills does not install or upgrade the Looper executable.
+
+Example requests to the harness:
+
+- "Use looper-prepare to turn this request into a spec, plan, tracker, and tickets for review."
+- "Use looper-prepare to run a clarification quiz before writing the spec."
+- "Use looper-prepare to plan delivery from these existing tickets."
+- "Use looper-operate to inspect this project's loop and explain its blocker."
 
 ## Quick start
 
@@ -745,9 +790,97 @@ servers can remain after the controller exits. tmux uses a separate session per
 launch on the compatible `slice-loop` socket.
 
 The detached caller receives one startup result when `--json` is set. `started`
-means controller ownership was acknowledged; `starting` means acknowledgement
-is pending. `already_running` means an existing execution was preserved. None
+means the controller owns execution and passed prerequisites inside its actual
+environment; `starting` means preflight or acknowledgement is pending.
+`already_running` means an existing execution was preserved. None
 of these means delivery is complete. Inspect `run.status` with `status --json`.
+
+### Host execution context
+
+Launchers, detached controllers, workers and validation resolve tools and host
+references through the same context. Set `LOOPER_CONTEXT` to an absolute JSON
+descriptor path, or use `$HOME/.config/looper/context.json`:
+
+```json
+{
+  "version": 1,
+  "environment": {
+    "PATH": "/opt/tools/bin:/usr/local/bin:/usr/bin:/bin",
+    "CODEX_HOME": "/home/operator/.codex",
+    "SSH_AUTH_SOCK": "/run/user/1000/ssh-agent.socket"
+  },
+  "required_executables": ["go", "make"]
+}
+```
+
+Use real host paths; values are literal and do not expand shell variables.
+Supported overrides are `HOME`, `PATH`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
+`XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `HERDR_CONFIG_PATH` and `NO_COLOR`.
+Other environment keys are rejected. Keep credentials in the host SSH agent,
+Tea configuration and provider store. Looper never saves an environment
+snapshot or sends secret environment values in terminal command arguments.
+Without a descriptor, tools inherit the calling process's environment, with
+outer terminal identities and Git checkout overrides removed.
+
+The detached controller resolves required executables and checks Git remote
+access, an authenticated Forgejo identity, push permission, rebase support and
+provider access before acknowledging startup. Git cannot prompt for credentials.
+These checks repeat before worker turns and at set boundaries. Recognized
+transient read failures get at most three attempts, each with a 15-second
+deadline. Authentication, configuration, exhausted quota, failed validation
+and uncertain ownership produce blockers; they do not trigger blind retries.
+Pending merges retain their existing canonical reconciliation rules.
+
+The default provider probe reads Codex account state and online ChatGPT rate
+limits, without creating a conversation or using a worker turn. For API keys
+or other providers, set `provider_probe` to an absolute host executable that
+checks the configured provider. It takes no arguments; output is discarded.
+Exit 0 confirms access, 75 means transient failure, 77 means authentication
+failure, and 78 means missing configuration. The probe must keep credentials
+host-owned. An account check does not establish every model's entitlement;
+actual inference can still fail. Codex's [account and rate-limit API](https://learn.chatgpt.com/docs/app-server)
+defines the default check.
+
+For a service, configure the descriptor once and check it from the service's
+own environment with `looper preflight --config FILE`. Passing `PATH` alone
+does not establish SSH-agent or provider access. Missing or expired access
+blocks before delivery begins. Repair the host references or authentication,
+then resume the same config. Recovery also rejects a changed worker home so
+it cannot silently move a saved conversation to a different store.
+
+### Approved successors
+
+List each independently approved successor explicitly:
+
+```sh
+looper resume --config /path/to/local/first.json \
+  --then /path/to/local/second.json \
+  --then /path/to/local/third.json --detach --activity --json
+```
+
+This pins a sequence of 2 to 32 unique configs for the same repository. Each
+plan and tracker must retain its own canonical approval and slice identities.
+The list cannot change during recovery. One controller holds the repository
+lease across all sets. Integration, the configured full gate and operational
+closure finish before it checks access and activates the successor.
+
+Each set keeps its own checkpoint, conversation, pending merge and budgets.
+The sequence saves a closure receipt before handoff. `status --json` exposes
+the phase, current config and progress, completed sets, failing component and
+recovery action. A missing supervisor with unfinished continuation is blocked,
+including when the predecessor is already complete. The original sequence
+entry owns the shared view; successors do not create extra active views.
+
+After restoring access or resolving ownership, resume the original entry:
+
+```sh
+looper resume --config /path/to/local/first.json --detach --json
+```
+
+Recovery verifies retained closure, config pins and live ownership. Completed
+integration is retained, and the successor resumes its existing conversation
+and remaining budget. Direct execution of a reserved successor is blocked.
 
 ### Native view and copying
 
@@ -806,6 +939,15 @@ tmux configuration.
 default, immediately as each event occurs. This is **JSONL**, not one final
 report. `--activity` adds filtered worker/tool events and heartbeats to the
 controller's phase records.
+
+When the controller exits, `loop.completed` reports `Loop completed successfully.`
+or `loop.failed` reports `Loop failed: REASON`. This final event
+covers the whole loop, including all explicitly listed successor sets.
+The existing `controller.completed` and `controller.error` events describe
+individual sets. The same final messages appear with `--output human`, even
+without `--activity`. In detached mode they appear in the controller pane;
+the launching terminal receives only startup status. The backend's pane-exit
+policy determines whether its output remains available after the controller exits.
 
 Pretty-print continuously:
 
@@ -1015,6 +1157,7 @@ workers or merges.
 looper run [--config FILE | --set NAME] [--activity]
            [--output jsonl|human] [--color auto|always|never]
 looper resume [--run ID | --project NAME | --config FILE] [--set NAME]
+              [--then FILE ...]
               [--detach] [--backend auto|herdr|zellij|tmux] [--activity]
               [--output jsonl|human] [--color auto|always|never] [--json]
 ```
@@ -1023,6 +1166,7 @@ looper resume [--run ID | --project NAME | --config FILE] [--set NAME]
 | --- | --- |
 | `--config`, `--run`, `--project`, `--set` | Select the exact approved set; see project selection |
 | `--detach` | Start a persistent native backend execution; otherwise foreground |
+| `--then FILE` | Pin an explicitly approved successor; repeat in execution order |
 | `--backend NAME` | Detached selection only; default `auto`, preferring Herdr, Zellij, tmux |
 | `--activity` | Enable filtered worker visibility; default off |
 | `--output FORMAT` | Controller stream; default `jsonl`, alternative `human` |
@@ -1297,6 +1441,8 @@ Looper stores configuration separately from execution state:
 ├── launch.lock
 ├── launch.json
 ├── launch-ready.json
+├── sequence.json
+├── sequence-owner.json
 ├── validation.json
 ├── validate.lock
 ├── worker-schema.json
@@ -1312,6 +1458,10 @@ merge records, pending merge and gate evidence. Runtime metadata includes PID
 and process start time, so PID reuse does not establish ownership. Check
 diagnostics are bounded to 1 MiB per capture and kept beside HEAD-bound evidence.
 State directories and files are created with private permissions.
+`sequence.json` appears only on the sequence entry; reserved successors have
+`sequence-owner.json`. These records contain config references, hashes,
+completion receipts and blockers. Runtime metadata also pins the worker home.
+Existing configuration hashes and checkpoints remain compatible.
 
 The discovery root is `$XDG_STATE_HOME/looper`, or `$HOME/.local/state/looper`
 when `XDG_STATE_HOME` is unset. Registration writes `runs/*.json` there.

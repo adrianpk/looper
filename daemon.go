@@ -19,12 +19,13 @@ import (
 
 // A read-only daemon query catches turns that outlive their codex exec client.
 func daemonWorkerIdle(session string) error {
-	home := os.Getenv("CODEX_HOME")
+	env, err := executionEnvironment()
+	if err != nil {
+		return err
+	}
+	home := environmentValue(env, "CODEX_HOME")
 	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
+		userHome := environmentValue(env, "HOME")
 		home = filepath.Join(userHome, ".codex")
 	}
 	socket := filepath.Join(home, "app-server-control", "app-server-control.sock")

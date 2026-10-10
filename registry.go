@@ -22,6 +22,9 @@ type runEntry struct {
 }
 
 type runBlocker struct {
+	Component  string     `json:"component,omitempty"`
+	Class      string     `json:"class,omitempty"`
+	Attempts   int        `json:"attempts,omitempty"`
 	Code       string     `json:"code"`
 	Message    string     `json:"message"`
 	Retryable  bool       `json:"retryable"`
@@ -44,31 +47,33 @@ func inspectAction(kind, target string) *runAction {
 
 type runInfo struct {
 	runEntry
-	Repo             string       `json:"repo,omitempty"`
-	Status           string       `json:"status"`
-	CheckpointStatus string       `json:"checkpoint_status,omitempty"`
-	Slice            int          `json:"slice,omitempty"`
-	TotalSlices      int          `json:"total_slices,omitempty"`
-	CompletedSlices  int          `json:"completed_slices"`
-	WorkerTurns      int          `json:"worker_turns"`
-	MaxWorkerTurns   int          `json:"max_worker_turns"`
-	StalledTurns     int          `json:"stalled_turns"`
-	MaxStalledTurns  int          `json:"max_stalled_turns"`
-	Session          string       `json:"worker_session,omitempty"`
-	TmuxSession      string       `json:"tmux_session,omitempty"`
-	Terminal         *terminalRef `json:"terminal,omitempty"`
-	ViewCommand      string       `json:"view_command,omitempty"`
-	Blocker          *runBlocker  `json:"blocker,omitempty"`
+	Repo             string        `json:"repo,omitempty"`
+	Status           string        `json:"status"`
+	CheckpointStatus string        `json:"checkpoint_status,omitempty"`
+	Slice            int           `json:"slice,omitempty"`
+	TotalSlices      int           `json:"total_slices,omitempty"`
+	CompletedSlices  int           `json:"completed_slices"`
+	WorkerTurns      int           `json:"worker_turns"`
+	MaxWorkerTurns   int           `json:"max_worker_turns"`
+	StalledTurns     int           `json:"stalled_turns"`
+	MaxStalledTurns  int           `json:"max_stalled_turns"`
+	Session          string        `json:"worker_session,omitempty"`
+	TmuxSession      string        `json:"tmux_session,omitempty"`
+	Terminal         *terminalRef  `json:"terminal,omitempty"`
+	ViewCommand      string        `json:"view_command,omitempty"`
+	Blocker          *runBlocker   `json:"blocker,omitempty"`
+	Sequence         *sequenceInfo `json:"sequence,omitempty"`
 }
 
 // Registry entries are an index. Configuration and checkpoints remain authoritative.
 func registryRoot() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
+	env, err := executionEnvironment()
+	if err != nil {
+		return "", err
+	}
+	base := environmentValue(env, "XDG_STATE_HOME")
 	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
+		home := environmentValue(env, "HOME")
 		base = filepath.Join(home, ".local", "state")
 	}
 	if !filepath.IsAbs(base) {
@@ -185,8 +190,8 @@ func discoveryFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-func inspectRun(e runEntry) runInfo {
-	r := runInfo{runEntry: e, Status: "invalid"}
+func inspectRun(e runEntry) (r runInfo) {
+	r = runInfo{runEntry: e, Status: "invalid"}
 	if e.problem != "" {
 		r.Blocker = &runBlocker{Code: "invalid_registry_entry", Message: e.problem, NextAction: inspectAction("inspect_registry", e.Config)}
 		return r
@@ -196,6 +201,7 @@ func inspectRun(e runEntry) runInfo {
 		r.Blocker = &runBlocker{Code: "invalid_checkpoint", Message: err.Error(), NextAction: inspectAction("inspect_checkpoint", e.Config)}
 		return r
 	}
+	defer sequenceStatus(a, &r)
 	actual, err := entryFor(a)
 	if err != nil || actual.ID != e.ID {
 		r.Blocker = &runBlocker{Code: "identity_changed", Message: "The registered configuration identity changed; inspect and register it explicitly", NextAction: commandAction("looper", "register", "--config", e.Config, "--json")}
@@ -234,6 +240,9 @@ func inspectRun(e runEntry) runInfo {
 	}
 	if busy {
 		r.Status = "running"
+		if runtime.Phase == "preflight" {
+			r.Status = "starting"
+		}
 		return r
 	}
 	if launching(a) {
@@ -276,6 +285,13 @@ func inspectRun(e runEntry) runInfo {
 	} else if a.state.Turns >= a.config.MaxTurns && a.state.Status != "complete" {
 		r.Status = "blocked"
 		r.Blocker = &runBlocker{Code: "turn_limit", Message: "The approved worker-turn budget is exhausted; explicit reconfiguration is required", NextAction: inspectAction("review_turn_budget", e.Config)}
+	} else if r.Status == "blocked" && a.state.Blocker != nil {
+		r.Blocker = a.state.Blocker
+		if r.Blocker.Class == "ownership" {
+			copy := *r.Blocker
+			copy.Retryable = true // Live ownership was checked above; resume checks it again under the lease.
+			r.Blocker = &copy
+		}
 	} else if r.Status == "blocked" {
 		r.Blocker = &runBlocker{Code: "previous_failure", Message: activityText(a.state.Feedback), Retryable: true, NextAction: inspectAction("resolve_blocker_then_resume", e.ID)}
 	}

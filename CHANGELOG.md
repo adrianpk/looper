@@ -6,6 +6,13 @@ Notable changes to Looper are documented here.
 
 ### Added
 
+- Optional agent skills prepare specifications, plans, trackers and tickets
+  from requests or existing artifacts, and guide operation of approved loops.
+- Explicit sequential delivery with `resume --then FILE`. Each approved set
+  completes integration, full validation and closure before its successor;
+  interrupted handoffs retain progress, conversations and budgets.
+- Host execution contexts and `preflight --config FILE` check tools, Git,
+  Forgejo permissions and provider access in the executing environment.
 - `looper --watch` opens the current project's active loop through its recorded
   terminal backend, without a separate script or a terminal session name.
   Multiple active matches are limited to that project's named delivery sets.
@@ -37,6 +44,11 @@ Notable changes to Looper are documented here.
 
 ### Fixed
 
+- Loops end with an explicit success or failure message covering the whole
+  delivery sequence, including failures during startup and between sets.
+- Detached startup checks access before reporting `started`. Authentication
+  loss and failed continuation expose actionable blockers; temporary remote
+  read failures use bounded retries without repeating merge submissions.
 - `looper --watch` uses valid Herdr attachment arguments. Inside Herdr, it
   follows the recorded pane as text, preserving slice, phase and message
   without opening a nested client or interrupting delivery.

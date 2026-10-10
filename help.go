@@ -6,7 +6,7 @@ import (
 )
 
 func printHelp() error {
-	_, err := fmt.Fprintf(os.Stdout, `looper %s: complete one approved slice set through dev.
+	_, err := fmt.Fprintf(os.Stdout, `looper %s: complete explicitly approved slice sets through dev.
 
 Usage:
   looper COMMAND [OPTIONS]
@@ -42,9 +42,13 @@ Commands:
             status --config FILE without --json returns the original raw checkpoint.
   resume    [--run ID | --project NAME | --config FILE] [--set NAME]
             [--detach] [--backend auto|herdr|zellij|tmux]
+            [--then FILE ...]
             [--activity] [--output jsonl|human] [--color auto|always|never] [--json]
             Continue the exact checkpoint and worker conversation, preserving budgets.
             --backend belongs to --detach. A single --json result requires --detach.
+            --then pins each approved successor in order; resume the original entry after interruption.
+  preflight --config FILE
+            Check executables, Git, Forgejo permissions and provider access without starting work.
   watch     [--run ID | --project NAME | --config FILE] [--set NAME]
             Open the current project's active loop. Also available as looper --watch.
             One active loop opens directly; several require a local --set NAME.
@@ -76,11 +80,23 @@ Agent workflow using the preferred defaults:
   Concurrent resume calls do not duplicate a controller; they return already_running.
   Active or orphaned workers, validations and unresolved ownership block recovery.
 
+Execution context and continuation:
+  LOOPER_CONTEXT selects a host-owned JSON descriptor; default: $HOME/.config/looper/context.json.
+  It holds location references and an optional provider_probe executable, never credentials.
+  The detached controller acknowledges started only after checking its own actual environment.
+  starting means preflight or acknowledgement is pending. Restore host access, then resume.
+  Read-only access checks have 15-second deadlines and at most three transient attempts.
+  Access is checked again before worker turns and at handoff; mutations are never retried blindly.
+  resume --config FIRST --then SECOND --detach --json runs a fixed approved sequence.
+  One repository lease spans integration, the full gate, closure and successor startup.
+  status --json includes sequence phase, current progress, blocker and recovery action.
+
 Streaming output:
   run and foreground resume emit JSONL by default, immediately, without ANSI colors.
   Fields: schema_version (1), time (UTC RFC3339), type, level, run_id, message;
   activity also includes label. --activity adds filtered worker/tool events and heartbeats.
   Types: controller.started, controller, controller.completed, controller.error,
+  loop.completed, loop.failed,
   worker.started, worker.message, worker.error, tool.started, tool.completed,
   tool.failed, validation.started, validation.check, heartbeat, activity.control.
   Levels: info, warning, error, debug. Raw worker payloads are never forwarded.
@@ -90,6 +106,9 @@ Streaming output:
   For resume --detach, --output selects the controller pane's stream format.
   --output human enables colored log lines using the color preference above.
   Output format is selected at startup; activity control changes visibility and colors.
+  The final loop.completed or loop.failed event covers the whole delivery sequence.
+  Human output ends with Loop completed successfully. or Loop failed: REASON.
+  Detached outcomes appear in the controller pane; the launcher returns startup status.
   Startup failures and final diagnostics go to stderr. A closed reader does not
   interrupt owned work; output failure is returned after that work finishes.
 

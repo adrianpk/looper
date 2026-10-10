@@ -68,6 +68,7 @@ type state struct {
 	Pending     *pendingMerge `json:"pending_merge,omitempty"`
 	Merged      []mergeRecord `json:"merged"`
 	Gate        *evidence     `json:"gate,omitempty"`
+	Blocker     *runBlocker   `json:"blocker,omitempty"`
 }
 
 type app struct {

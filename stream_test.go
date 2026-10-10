@@ -76,6 +76,107 @@ func waitFixtureWorker(t *testing.T, path string) {
 	}
 }
 
+// A loop reports one final outcome after every set, including startup and handoff failures.
+func TestLoopOutcome(t *testing.T) {
+	for _, format := range []outputFormat{outputJSONL, outputHuman} {
+		for _, tc := range []struct {
+			name, mode       string
+			sequence, failed bool
+			merges, closures int
+		}{
+			{"single complete", "normal", false, false, 1, 1},
+			{"single failed", "gate-failure", false, true, 1, 0},
+			{"startup failed", "preflight", false, true, 0, 0},
+			{"sequence complete", "normal", true, false, 2, 2},
+			{"handoff failed", "handoff", true, true, 1, 1},
+		} {
+			t.Run(string(format)+"/"+tc.name, func(t *testing.T) {
+				mode := tc.mode
+				if mode == "preflight" || mode == "handoff" {
+					mode = "normal"
+				}
+				var a, b *app
+				var fixturePath string
+				if tc.sequence {
+					a, b, fixturePath = setupSequence(t, mode)
+					if err := prepareSequence(a, []string{b.path}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					recoveryEnvironment(t)
+					a, fixturePath = setupLoop(t, mode)
+				}
+				if tc.mode == "preflight" || tc.mode == "handoff" {
+					probe := filepath.Join(t.TempDir(), "provider")
+					script := "#!/bin/sh\nexit 77\n"
+					if tc.mode == "handoff" {
+						script = "#!/bin/sh\nif grep -q '\"phase\": \"handoff\"' " + shellQuote(filepath.Join(a.dir, "sequence.json")) + "; then exit 77; fi\n"
+					}
+					if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
+						t.Fatal(err)
+					}
+					testHostContext(t, executionContext{Version: 1, ProviderProbe: probe})
+				}
+				args := []string{"resume", "--config", a.path, "--output", string(format), "--color", "always"}
+				if format == outputJSONL {
+					args = append(args, "--activity")
+				}
+				controller := exec.Command("looper", args...)
+				var out, diagnostic bytes.Buffer
+				controller.Stdout, controller.Stderr = &out, &diagnostic
+				err := controller.Run()
+				if (err != nil) != tc.failed {
+					t.Fatalf("unexpected exit: %v stderr=%s", err, diagnostic.String())
+				}
+				var f fixture
+				if err := readJSON(fixturePath, &f); err != nil || f.Merges != tc.merges || f.Closes != tc.closures {
+					t.Fatalf("outcome changed delivery: %+v %v", f, err)
+				}
+				lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+				if format == outputHuman {
+					complete, failed := strings.Count(out.String(), "Loop completed successfully."), strings.Count(out.String(), "Loop failed: ")
+					if complete+failed != 1 || (failed == 1) != tc.failed {
+						t.Fatalf("missing or premature loop outcome: %s", out.String())
+					}
+					last := lines[len(lines)-1]
+					if !strings.Contains(last, "Loop ") || !strings.Contains(last, "\x1b[") {
+						t.Fatalf("outcome is not the last colored message: %q", last)
+					}
+					return
+				}
+				want := "loop.completed"
+				if tc.failed {
+					want = "loop.failed"
+				}
+				outcomes := 0
+				for i, line := range lines {
+					var record logEvent
+					if err := json.Unmarshal([]byte(line), &record); err != nil || record.RunID == "" {
+						t.Fatalf("invalid JSONL record: %s %v", line, err)
+					}
+					record = decodeLog(t, line, record.RunID)
+					if record.Type != "loop.completed" && record.Type != "loop.failed" {
+						continue
+					}
+					outcomes++
+					if record.Type != want || i != len(lines)-1 {
+						t.Fatalf("premature or incorrect loop outcome: %+v", record)
+					}
+					if tc.failed && (record.Level != "error" || !strings.HasPrefix(record.Message, "Loop failed: ") || record.Message == "Loop failed: ") {
+						t.Fatalf("failure lacks its reason: %+v", record)
+					}
+					if !tc.failed && (record.Level != "info" || record.Message != "Loop completed successfully.") {
+						t.Fatalf("incorrect success message: %+v", record)
+					}
+				}
+				if outcomes != 1 {
+					t.Fatalf("got %d loop outcomes: %s", outcomes, out.String())
+				}
+			})
+		}
+	}
+}
+
 // jq receives default JSONL before a worker finishes; successful and blocked runs keep stdout machine-readable.
 func TestLiveStream(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {

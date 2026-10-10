@@ -1,18 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 )
 
 func (a *app) fetch() error {
-	_, err := git(a.config.Repo, "fetch", "origin", "refs/heads/dev:refs/remotes/origin/dev")
+	_, err := accessCommand("git", a.config.Repo, "git", "fetch", "origin", "refs/heads/dev:refs/remotes/origin/dev")
 	return err
 }
 
@@ -46,11 +46,6 @@ func (a *app) syncDev() error {
 }
 
 func (a *app) run() error {
-	for _, name := range []string{"git", "tea", "codex", "acta", "sh"} {
-		if _, err := exec.LookPath(name); err != nil {
-			return err
-		}
-	}
 	if err := a.fetch(); err != nil {
 		return err
 	}
@@ -386,8 +381,10 @@ func (a *app) validate(dir string, commands []string) error {
 			a.activity.check(i+1, len(commands), cmd)
 		}
 		_, _ = fmt.Fprintf(&log, "$ %s\n", cmd)
-		child := exec.Command("sh", "-ec", cmd)
-		child.Dir = dir
+		child, err := executionCommand(context.Background(), dir, "sh", "-ec", cmd)
+		if err != nil {
+			return err
+		}
 		child.Stdout = &log
 		child.Stderr = &log
 		if err := child.Start(); err != nil {
@@ -405,7 +402,7 @@ func (a *app) validate(dir string, commands []string) error {
 			if saveErr := writeAtomic(logPath, log.b.Bytes()); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
-			return fmt.Errorf("check %d failed (%s); diagnostics: %s", i+1, cmd, logPath)
+			return contextFailure("validation", "validation", fmt.Sprintf("Check %d failed; diagnostics: %s", i+1, logPath), 1)
 		}
 		after, err := cleanHead(dir)
 		if err != nil {

@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
 // The shared Git directory identifies a project across subdirectories, symlinks and worktrees.
 func projectIdentity(dir string) (string, error) {
-	command := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	command, err := executionCommand(context.Background(), dir, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
 	// A launcher's Git overrides must not redirect project detection away from the requested directory.
-	for _, entry := range os.Environ() {
+	env := command.Env
+	command.Env = nil
+	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		if key != "GIT_DIR" && key != "GIT_WORK_TREE" && key != "GIT_COMMON_DIR" {
 			command.Env = append(command.Env, entry)
