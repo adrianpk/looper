@@ -4,6 +4,8 @@ Notable changes to Looper are documented here.
 
 ## Unreleased
 
+## 0.4.1 - 2026-10-11
+
 ### Added
 
 - Final-gate failures can trigger scoped repair PRs and automatic revalidation
@@ -47,6 +49,9 @@ Notable changes to Looper are documented here.
 
 ### Fixed
 
+- Completed runs remain complete when another delivery owns the repository.
+- Closure instructions identify the incomplete artifact and expected metadata.
+  Access and integrity failures block closure without requesting blind edits.
 - Git access retains the default SSH executable when validation scripts narrow
   `PATH`, while preserving explicit `GIT_SSH_COMMAND` settings.
 - Loops end with an explicit success or failure message covering the whole

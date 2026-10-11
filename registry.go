@@ -258,6 +258,12 @@ func inspectRun(e runEntry) (r runInfo) {
 		}
 		return r
 	}
+	// A successor can own the repository without changing this run's delivered result.
+	// Same-run ownership and checkpoint identity were still checked above; resume reacquires its lease.
+	if a.state.Status == "complete" {
+		r.Status = "complete"
+		return r
+	}
 	repoLock, err := repositoryLock(a)
 	if err == nil {
 		busy, err = lockBusy(repoLock)

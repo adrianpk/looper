@@ -25,6 +25,7 @@ type fixture struct {
 	Repairs   int           `json:"repairs"`
 	Merges    int           `json:"merges"`
 	Closes    int           `json:"closes"`
+	CloseTask string        `json:"close_task,omitempty"`
 	PR        *pullRequest  `json:"pr"`
 	History   []pullRequest `json:"history,omitempty"`
 }
@@ -122,6 +123,12 @@ func fixtureCommand(tool string, args []string) error {
 			return printJSON(prs)
 		}
 		if strings.Contains(endpoint, "/pulls/") {
+			if f.Mode == "closure-auth" {
+				return fmt.Errorf("401 Unauthorized token=private-value")
+			}
+			if f.Mode == "closure-transient" {
+				return fmt.Errorf("503 Service Unavailable")
+			}
 			number, _ := strconv.Atoi(filepath.Base(endpoint))
 			for _, p := range f.History {
 				if p.Number == number {
@@ -204,6 +211,7 @@ func fixtureCommand(tool string, args []string) error {
 		}
 		prompt := string(input)
 		phase := ""
+		task := ""
 		configPath := ""
 		var cfg config
 		for _, line := range strings.Split(prompt, "\n") {
@@ -215,6 +223,9 @@ func fixtureCommand(tool string, args []string) error {
 			}
 			if strings.HasPrefix(line, "Phase: ") {
 				phase = strings.TrimPrefix(line, "Phase: ")
+			}
+			if value, ok := strings.CutPrefix(line, "Current controller instruction: "); ok {
+				task = value
 			}
 		}
 		f.Calls++
@@ -358,6 +369,14 @@ func fixtureCommand(tool string, args []string) error {
 				}
 			case "close":
 				f.Closes++
+				f.CloseTask = task
+				if f.Mode == "closure-feedback" {
+					result = workerResult{Status: "blocked", Message: "Closure instruction captured"}
+					break
+				}
+				if f.Mode == "closure-stalled" {
+					break
+				}
 				for _, p := range []string{cfg.Plan, cfg.Tracker} {
 					b, err := os.ReadFile(filepath.Join(f.Repo, p))
 					if err != nil {

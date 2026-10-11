@@ -1331,6 +1331,12 @@ documents, changing only `closure_paths`. Completion verifies:
   all subsequent changes are confined to `closure_paths`.
 - Reports are delivered; plan and tracker are completed with no unchecked tasks.
 
+When closure metadata is incomplete, the worker receives the artifact path,
+failed condition and expected result. Changes remain limited to `closure_paths`.
+Access failures and inconsistent merge or gate evidence stop closure with a
+blocker instead of requesting another editing turn. Resume preserves the
+conversation, budgets and successful gate evidence after the condition is resolved.
+
 A failing full gate blocks closure. Additional implementation requiring a new
 slice identity needs a newly approved configuration; Looper does not invent
 replacement slices. Delivery ends at `dev`: main integration, tagging, release,
@@ -1408,6 +1414,9 @@ not refund its budget.
 `status` is a local checkpoint/ownership inspection, not an exhaustive forge
 or completion audit. `resume` performs the live execution checks. A saved
 `running` checkpoint by itself is not proof of a live process.
+A completed historical run stays complete when another run owns its repository.
+Its own active controller still appears as `running` alongside
+`checkpoint_status: complete`; every resume must acquire the execution lease.
 
 Common issues and the required response:
 
@@ -1421,6 +1430,7 @@ Common issues and the required response:
 | `ownership_unknown`, `invalid_runtime` | Resolve unreadable or inconsistent ownership metadata |
 | `invalid_checkpoint`, `invalid_registry_entry`, `identity_changed` | Inspect the exact configuration, state or index before registration/reconfiguration |
 | `previous_failure` | Resolve the recorded failure, then resume the same checkpoint |
+| `closure_integrity` | Inspect canonical merges, the tested candidate and approved closure paths before resuming |
 | `progress_required` | Resolve the workspace blocker; resume requires observable progress |
 | `turn_limit` | Review the exhausted total budget and deliberately reconfigure approved work |
 | `pending_merge` | Resume may reconcile a canonically confirmed merge |

@@ -463,9 +463,36 @@ func (a *app) validate(dir string, commands []string) error {
 	return writeJSON(a.evidencePath(head), evidence{Head: head, Commands: commands, Log: logPath})
 }
 
+type closureMetadataError struct {
+	Artifact, Condition, Expected string
+}
+
+func (e *closureMetadataError) Error() string {
+	return fmt.Sprintf("%s: %s; expected %s", e.Artifact, e.Condition, e.Expected)
+}
+
+func (a *app) closureIntegrity(reason string) error {
+	failure := contextFailure("closure", "integrity", reason, 1)
+	failure.Blocker.NextAction = inspectAction("inspect_closure_integrity", a.config.Repo)
+	return failure
+}
+
+// Keep typed access failures and their retry counts; local verification failures require inspection.
+func (a *app) closureFailure(reason string, err error) error {
+	var known *executionFailure
+	if errors.As(err, &known) {
+		return err
+	}
+	failure := classifyAccess("closure", err, 1)
+	if failure.Blocker.Class != "access" {
+		return failure
+	}
+	return a.closureIntegrity(reason)
+}
+
 func (a *app) closeSet() error {
 	if err := a.syncDev(); err != nil {
-		return err
+		return a.closureFailure("Primary dev must be clean, pushed and synchronized before closure", err)
 	}
 	// Runs without delegated repair authority retain their explicit manual retry workflow.
 	if a.state.GateFailure != nil && a.state.GateRepairPolicy == nil {
@@ -527,7 +554,8 @@ func (a *app) closeSet() error {
 		}
 	}
 	for {
-		if err := a.finished(); err == nil {
+		err := a.finished()
+		if err == nil {
 			a.state.Status = "complete"
 			a.state.Feedback = ""
 			if err := a.save(); err != nil {
@@ -536,14 +564,25 @@ func (a *app) closeSet() error {
 			a.printf(activitySuccess, "Slice set completed: %d/%d integrated in dev; full gate passed at %s.\n", len(a.config.Slices), len(a.config.Slices), a.state.Gate.Head)
 			return nil
 		}
-		if err := a.work("close", fmt.Sprintf("Full gate passed at immutable candidate %s. Evidence: %s. Stop only owned test fixtures after validation. Close reports, plan and tracker, update the local tree/handoff when applicable, record activity, commit and push documentation closure to dev. Only the configured closure paths may differ from the tested candidate. Return closed when done.", a.state.Gate.Head, a.evidencePath(a.state.Gate.Head))); err != nil {
+		var metadata *closureMetadataError
+		if !errors.As(err, &metadata) {
+			return err
+		}
+		allowed := false
+		for _, path := range a.config.ClosurePaths {
+			allowed = allowed || path == metadata.Artifact
+		}
+		if !allowed {
+			return a.closureIntegrity(fmt.Sprintf("%s; the artifact is outside approved closure_paths", metadata))
+		}
+		if err := a.work("close", fmt.Sprintf("Closure verification failed: %s. Full gate passed at immutable candidate %s. Evidence: %s. Stop only owned test fixtures after validation. Close reports, plan and tracker, update the local tree/handoff when applicable, record activity, commit and push documentation closure to dev. Only the configured closure paths may differ from the tested candidate. Return closed when done.", metadata, a.state.Gate.Head, a.evidencePath(a.state.Gate.Head))); err != nil {
 			return err
 		}
 		if err := a.fetch(); err != nil {
 			return err
 		}
 		if err := a.syncDev(); err != nil {
-			return err
+			return a.closureFailure("Primary dev must be clean, pushed and synchronized after closure work", err)
 		}
 		if err := a.verifyClosureDiff(); err != nil {
 			return err
@@ -553,14 +592,14 @@ func (a *app) closeSet() error {
 
 func (a *app) verifyClosureDiff() error {
 	if a.state.Gate == nil {
-		return errors.New("no full-gate evidence")
+		return a.closureIntegrity("no full-gate evidence")
 	}
 	if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", a.state.Gate.Head, "origin/dev"); err != nil {
-		return errors.New("validated candidate is not an ancestor of current dev")
+		return a.closureFailure("validated candidate is not an ancestor of current dev", err)
 	}
 	paths, err := git(a.config.Repo, "diff", "--name-only", a.state.Gate.Head, "origin/dev")
 	if err != nil {
-		return err
+		return a.closureFailure("Cannot verify changed paths against the full-gate candidate", err)
 	}
 	allowed := map[string]bool{}
 	for _, p := range a.config.ClosurePaths {
@@ -568,7 +607,7 @@ func (a *app) verifyClosureDiff() error {
 	}
 	for _, p := range strings.Split(paths, "\n") {
 		if p != "" && !allowed[p] {
-			return fmt.Errorf("runtime or unapproved artifact changed after full gate: %s", p)
+			return a.closureIntegrity(fmt.Sprintf("runtime or unapproved artifact changed after full gate: %s", p))
 		}
 	}
 	return nil
@@ -576,56 +615,59 @@ func (a *app) verifyClosureDiff() error {
 
 func (a *app) finished() error {
 	if a.state.Next != len(a.config.Slices) || a.state.Gate == nil {
-		return errors.New("slices or full gate are incomplete")
+		return a.closureIntegrity("slices or full gate are incomplete")
 	}
 	if err := a.syncDev(); err != nil {
-		return err
+		return a.closureFailure("Primary dev must be clean, pushed and synchronized for closure verification", err)
 	}
 	if err := a.verifyClosureDiff(); err != nil {
 		return err
 	}
 	for _, repair := range a.state.GateRepairs {
 		if repair.Merge == nil {
-			return errors.New("gate repair is not integrated")
+			return a.closureIntegrity("gate repair is not integrated")
 		}
 		r := repair.Merge
 		p, err := a.pull(r.PR)
 		if err != nil {
-			return err
+			return a.closureFailure(fmt.Sprintf("Cannot verify canonical gate-repair PR #%d", r.PR), err)
 		}
 		if !p.Merged || p.Head.SHA != r.Head || p.MergedCommit != r.MergedCommit {
-			return errors.New("gate repair merge no longer matches canonical state")
+			return a.closureIntegrity(fmt.Sprintf("gate repair merge for PR #%d no longer matches canonical state", r.PR))
 		}
 		if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", r.MergedCommit, "origin/dev"); err != nil {
-			return err
+			return a.closureFailure(fmt.Sprintf("Gate-repair PR #%d is not integrated in origin/dev", r.PR), err)
 		}
 	}
 	for i, r := range a.state.Merged {
 		p, err := a.pull(r.PR)
 		if err != nil {
-			return err
+			return a.closureFailure(fmt.Sprintf("Cannot verify canonical PR #%d", r.PR), err)
 		}
 		if !p.Merged || p.MergedCommit != r.MergedCommit {
-			return errors.New("recorded merge no longer matches canonical state")
+			return a.closureIntegrity(fmt.Sprintf("recorded merge for PR #%d no longer matches canonical state", r.PR))
 		}
 		if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", r.MergedCommit, "origin/dev"); err != nil {
-			return err
+			return a.closureFailure(fmt.Sprintf("Recorded PR #%d is not integrated in origin/dev", r.PR), err)
 		}
 		report, err := git(a.config.Repo, "show", "origin/dev:"+a.config.Slices[i].Report)
 		if err != nil {
-			return err
+			return a.closureFailure("Cannot read closure artifact "+a.config.Slices[i].Report+" from origin/dev", err)
 		}
 		if !hasStatus(report, "delivered") {
-			return errors.New("slice report is not delivered")
+			return &closureMetadataError{a.config.Slices[i].Report, "Status is not Delivered", "Status: Delivered"}
 		}
 	}
 	for _, path := range []string{a.config.Plan, a.config.Tracker} {
 		doc, err := git(a.config.Repo, "show", "origin/dev:"+path)
 		if err != nil {
-			return err
+			return a.closureFailure("Cannot read closure artifact "+path+" from origin/dev", err)
 		}
-		if !hasStatus(doc, "completed") || strings.Contains(doc, "- [ ]") {
-			return errors.New("plan/tracker completion metadata or gates are incomplete")
+		if !hasStatus(doc, "completed") {
+			return &closureMetadataError{path, "Status is not Completed", "Status: Completed"}
+		}
+		if strings.Contains(doc, "- [ ]") {
+			return &closureMetadataError{path, "unchecked tasks or gates remain", "no unchecked tasks or gates after verifying their completion"}
 		}
 	}
 	return nil
