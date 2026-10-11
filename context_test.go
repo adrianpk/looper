@@ -55,6 +55,102 @@ func TestHostExecutionContext(t *testing.T) {
 	}
 }
 
+// Git keeps its SSH transport when a gate narrows PATH, without requiring SSH for local remotes.
+func TestGitSSHEnvironment(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realShell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, toolDir   string
+		explicit, local bool
+	}{
+		{"default", "tools", false, false},
+		{"quoted path", "tools with 'quotes", false, false},
+		{"explicit command", "custom tools", true, false},
+		{"local without ssh", "tools", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tools := filepath.Join(root, tc.toolDir)
+			restricted := filepath.Join(root, "restricted")
+			for _, dir := range []string{tools, restricted} {
+				if err := os.Mkdir(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				for name, executable := range map[string]string{"git": realGit, "sh": realShell} {
+					if err := os.Symlink(executable, filepath.Join(dir, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			sshPath := filepath.Join(tools, "ssh")
+			if tc.explicit {
+				sshPath = filepath.Join(tools, "custom ssh")
+			}
+			arguments := filepath.Join(root, "ssh-arguments")
+			if !tc.local {
+				// An empty upload-pack advertisement exercises real Git without a network or credentials.
+				script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(arguments) + "\nprintf '0000'\n"
+				if err := os.WriteFile(sshPath, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			explicit := ""
+			if tc.explicit {
+				explicit = shellQuote(sshPath) + " --fixture-option 'kept value'"
+			}
+			t.Setenv("PATH", restricted)
+			t.Setenv("GIT_SSH_COMMAND", explicit)
+			t.Setenv("GIT_SSH_VARIANT", "ssh")
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			testHostContext(t, executionContext{Version: 1, Environment: map[string]string{
+				"HOME": root, "PATH": tools, "SSH_AUTH_SOCK": "",
+				"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+			}})
+			remote := "ssh://fixture.invalid/repo"
+			if tc.local {
+				remote = filepath.Join(root, "remote.git")
+				child, err := executionCommand(context.Background(), root, "git", "init", "--bare", "--quiet", remote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if out, err := child.CombinedOutput(); err != nil {
+					t.Fatalf("create local remote: %v\n%s", err, out)
+				}
+			}
+			gate := "PATH=" + shellQuote(restricted) + "; export PATH; git ls-remote " + shellQuote(remote)
+			child, err := executionCommand(context.Background(), root, "sh", "-ec", gate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.explicit && environmentValue(child.Env, "GIT_SSH_COMMAND") != explicit {
+				t.Fatal("explicit SSH command changed")
+			}
+			if out, err := child.CombinedOutput(); err != nil {
+				t.Fatalf("gate Git access after PATH replacement: %v\n%s", err, out)
+			}
+			if !tc.local {
+				data, err := os.ReadFile(arguments)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prefix := "-o\nBatchMode=yes\n-o\nConnectTimeout=10\n"
+				if tc.explicit {
+					prefix = "--fixture-option\nkept value\n"
+				}
+				if !strings.HasPrefix(string(data), prefix) {
+					t.Fatalf("unexpected SSH arguments: %s", data)
+				}
+			}
+		})
+	}
+}
+
 // Context files accept location references, never arbitrary secret environment values.
 func TestContextConfiguration(t *testing.T) {
 	for _, tc := range []struct {

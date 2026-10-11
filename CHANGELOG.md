@@ -47,6 +47,8 @@ Notable changes to Looper are documented here.
 
 ### Fixed
 
+- Git access retains the default SSH executable when validation scripts narrow
+  `PATH`, while preserving explicit `GIT_SSH_COMMAND` settings.
 - Loops end with an explicit success or failure message covering the whole
   delivery sequence, including failures during startup and between sets.
 - Detached startup checks access before reporting `started`. Authentication

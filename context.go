@@ -96,7 +96,12 @@ func executionEnvironment() ([]string, error) {
 	// Access probes and controller Git operations must not wait for interactive credentials.
 	values["GIT_TERMINAL_PROMPT"] = "0"
 	if values["GIT_SSH_COMMAND"] == "" {
-		values["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=10"
+		// Gates can narrow PATH; retain the transport without making SSH a required tool.
+		ssh := "ssh"
+		if path, err := resolveExecutable("ssh", []string{"PATH=" + values["PATH"]}); err == nil {
+			ssh = shellQuote(path)
+		}
+		values["GIT_SSH_COMMAND"] = ssh + " -o BatchMode=yes -o ConnectTimeout=10"
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
