@@ -47,22 +47,23 @@ func inspectAction(kind, target string) *runAction {
 
 type runInfo struct {
 	runEntry
-	Repo             string        `json:"repo,omitempty"`
-	Status           string        `json:"status"`
-	CheckpointStatus string        `json:"checkpoint_status,omitempty"`
-	Slice            int           `json:"slice,omitempty"`
-	TotalSlices      int           `json:"total_slices,omitempty"`
-	CompletedSlices  int           `json:"completed_slices"`
-	WorkerTurns      int           `json:"worker_turns"`
-	MaxWorkerTurns   int           `json:"max_worker_turns"`
-	StalledTurns     int           `json:"stalled_turns"`
-	MaxStalledTurns  int           `json:"max_stalled_turns"`
-	Session          string        `json:"worker_session,omitempty"`
-	TmuxSession      string        `json:"tmux_session,omitempty"`
-	Terminal         *terminalRef  `json:"terminal,omitempty"`
-	ViewCommand      string        `json:"view_command,omitempty"`
-	Blocker          *runBlocker   `json:"blocker,omitempty"`
-	Sequence         *sequenceInfo `json:"sequence,omitempty"`
+	Repo             string             `json:"repo,omitempty"`
+	Status           string             `json:"status"`
+	CheckpointStatus string             `json:"checkpoint_status,omitempty"`
+	Slice            int                `json:"slice,omitempty"`
+	TotalSlices      int                `json:"total_slices,omitempty"`
+	CompletedSlices  int                `json:"completed_slices"`
+	WorkerTurns      int                `json:"worker_turns"`
+	MaxWorkerTurns   int                `json:"max_worker_turns"`
+	StalledTurns     int                `json:"stalled_turns"`
+	MaxStalledTurns  int                `json:"max_stalled_turns"`
+	Session          string             `json:"worker_session,omitempty"`
+	TmuxSession      string             `json:"tmux_session,omitempty"`
+	Terminal         *terminalRef       `json:"terminal,omitempty"`
+	ViewCommand      string             `json:"view_command,omitempty"`
+	Blocker          *runBlocker        `json:"blocker,omitempty"`
+	Sequence         *sequenceInfo      `json:"sequence,omitempty"`
+	ProviderRetry    *providerRetryInfo `json:"provider_retry,omitempty"`
 }
 
 // Registry entries are an index. Configuration and checkpoints remain authoritative.
@@ -211,6 +212,7 @@ func inspectRun(e runEntry) (r runInfo) {
 	r.TotalSlices, r.Session = len(a.config.Slices), a.state.Session
 	r.CompletedSlices = a.state.Next
 	r.WorkerTurns, r.MaxWorkerTurns = a.state.Turns, a.config.MaxTurns
+	r.ProviderRetry = a.retryInfo()
 	r.StalledTurns, r.MaxStalledTurns = a.state.Stalled, a.config.MaxStalled
 	if a.state.Next < r.TotalSlices {
 		r.Slice = a.state.Next + 1
@@ -240,6 +242,9 @@ func inspectRun(e runEntry) (r runInfo) {
 	}
 	if busy {
 		r.Status = "running"
+		if a.state.Status == "waiting" && r.ProviderRetry != nil && r.ProviderRetry.NextAt != nil {
+			r.Status, r.Blocker = "waiting", a.state.Blocker
+		}
 		if runtime.Phase == "preflight" {
 			r.Status = "starting"
 		}
@@ -283,7 +288,7 @@ func inspectRun(e runEntry) (r runInfo) {
 		return r
 	}
 	r.Status = a.state.Status
-	if r.Status == "running" {
+	if r.Status == "running" || r.Status == "waiting" {
 		r.Status = "interrupted"
 	}
 	if a.state.Pending != nil {

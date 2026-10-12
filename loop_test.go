@@ -16,18 +16,21 @@ import (
 )
 
 type fixture struct {
-	Repo      string        `json:"repo"`
-	Worktree  string        `json:"worktree"`
-	Mode      string        `json:"mode"`
-	Calls     int           `json:"calls"`
-	Implement int           `json:"implement"`
-	Prepare   int           `json:"prepare"`
-	Repairs   int           `json:"repairs"`
-	Merges    int           `json:"merges"`
-	Closes    int           `json:"closes"`
-	CloseTask string        `json:"close_task,omitempty"`
-	PR        *pullRequest  `json:"pr"`
-	History   []pullRequest `json:"history,omitempty"`
+	Repo           string        `json:"repo"`
+	Worktree       string        `json:"worktree"`
+	Mode           string        `json:"mode"`
+	Calls          int           `json:"calls"`
+	Implement      int           `json:"implement"`
+	Prepare        int           `json:"prepare"`
+	Repairs        int           `json:"repairs"`
+	Merges         int           `json:"merges"`
+	Closes         int           `json:"closes"`
+	CloseTask      string        `json:"close_task,omitempty"`
+	WorkerPhases   []string      `json:"worker_phases,omitempty"`
+	WorkerSessions []string      `json:"worker_sessions,omitempty"`
+	Failures       int           `json:"failures,omitempty"`
+	PR             *pullRequest  `json:"pr"`
+	History        []pullRequest `json:"history,omitempty"`
 }
 
 func TestMain(m *testing.M) {
@@ -229,10 +232,19 @@ func fixtureCommand(tool string, args []string) error {
 			}
 		}
 		f.Calls++
+		failed := f.Mode == "capacity-always" || (f.Mode == "capacity-once" || f.Mode == "capacity-partial") && f.Calls == 1 || f.Mode == "capacity-gate" && phase == "repair_gate" && f.Failures == 0 || f.Mode == "capacity-close" && phase == "close" && f.Failures == 0 || f.Mode == "capacity-prepare" && phase == "prepare_gate" && f.Prepare == 1 && f.Failures == 0 || f.Mode == "unknown-json" || f.Mode == "authentication-json"
+		if strings.HasPrefix(f.Mode, "capacity-") || strings.HasSuffix(f.Mode, "-json") {
+			f.WorkerPhases = append(f.WorkerPhases, phase)
+			session := "new"
+			if len(args) > 1 && args[1] == "resume" {
+				session = args[len(args)-2]
+			}
+			f.WorkerSessions = append(f.WorkerSessions, session)
+		}
 		result := workerResult{Status: "continue", Message: "More work remains"}
 		if f.Mode == "early-complete" {
 			result.Status = "closed"
-		} else {
+		} else if !failed || f.Mode == "capacity-partial" {
 			switch phase {
 			case "implement":
 				f.Implement++
@@ -393,6 +405,27 @@ func fixtureCommand(tool string, args []string) error {
 			default:
 				return fmt.Errorf("unexpected phase %q", phase)
 			}
+		}
+		if failed {
+			f.Failures++
+			if err := save(); err != nil {
+				return err
+			}
+			session := cfg.Session
+			if session == "" {
+				session = "11111111-1111-4111-8111-111111111111"
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"type": "thread.started", "thread_id": session})
+			message := "Selected model is at capacity. Please try a different model."
+			if f.Mode == "unknown-json" {
+				message = "Unknown execution failure token=private-value"
+			}
+			if f.Mode == "authentication-json" {
+				message = "401 Unauthorized token=private-value"
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "error", "message": message})
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "turn.failed", "error": map[string]string{"message": message}})
+			os.Exit(1) // Match Codex exec: error events on stdout, no failure diagnostic on stderr.
 		}
 		resultPath := ""
 		for i, arg := range args {

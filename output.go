@@ -134,7 +134,7 @@ func statusStyle(status string) activityStyle {
 		return activityRunning
 	case "complete", "registered", "ready", "ok":
 		return activitySuccess
-	case "interrupted", "selection_required":
+	case "interrupted", "selection_required", "waiting":
 		return activityWarning
 	default:
 		return activityFailure

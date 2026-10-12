@@ -49,7 +49,7 @@ func belongsToProject(e runEntry, identity string) bool {
 func activeRuns(runs []runInfo) []runInfo {
 	var active []runInfo
 	for _, r := range runs {
-		if r.Status == "running" || r.Status == "starting" {
+		if r.Status == "running" || r.Status == "starting" || r.Status == "waiting" {
 			active = append(active, r)
 		}
 	}

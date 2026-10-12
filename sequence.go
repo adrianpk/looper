@@ -241,6 +241,9 @@ func sequenceStatus(a *app, r *runInfo) {
 	if current, err := sequenceApp(root, s.Sets[s.Current]); err == nil {
 		r.Sequence.CompletedSlices, r.Sequence.TotalSlices = current.state.Next, len(current.config.Slices)
 		r.Sequence.WorkerTurns, r.Sequence.WorkerSession = current.state.Turns, current.state.Session
+		if root == a || a.path == current.path {
+			r.ProviderRetry = current.retryInfo()
+		}
 	} else {
 		r.Status, r.Blocker = "blocked", &contextFailure("sequence", "configuration", "Current sequence config or checkpoint changed", 1).Blocker
 		return
@@ -260,6 +263,12 @@ func sequenceStatus(a *app, r *runInfo) {
 			r.Status = "queued"
 			if a.path == s.Sets[s.Current].Path {
 				r.Status = "running_in_sequence"
+			}
+		}
+		if (root == a || a.path == s.Sets[s.Current].Path) && r.ProviderRetry != nil && r.ProviderRetry.NextAt != nil {
+			r.Status = "waiting"
+			if current, err := sequenceApp(root, s.Sets[s.Current]); err == nil {
+				r.Blocker = current.state.Blocker
 			}
 		}
 	} else {

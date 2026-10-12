@@ -1406,7 +1406,8 @@ not refund its budget.
 | `ready` | Valid configuration/checkpoint ready for execution |
 | `starting` | Detached launch is active; ownership acknowledgement is pending |
 | `running` | A controller currently holds the run lock |
-| `interrupted` | Saved state was running, but its controller is no longer active |
+| `waiting` | A controller holds ownership while waiting for a scheduled provider-capacity retry |
+| `interrupted` | Saved state was running or waiting, but its controller is no longer active |
 | `blocked` | A failure, ownership issue or budget requires attention |
 | `complete` | Checkpoint records completion; executing it again verifies the result |
 | `invalid` | Configuration, registry or runtime metadata cannot be safely inspected |
@@ -1417,6 +1418,25 @@ or completion audit. `resume` performs the live execution checks. A saved
 A completed historical run stays complete when another run owns its repository.
 Its own active controller still appears as `running` alongside
 `checkpoint_status: complete`; every resume must acquire the execution lease.
+
+Confirmed model-capacity errors receive up to five automatic retries after
+1, 2, 4, 8 and 10 minutes. Each retry resumes the same conversation and phase
+after checking worker inactivity, repository ownership and access. Looper never
+changes the model. Authentication, integrity and unknown execution failures
+remain blocked.
+
+The retry allowance applies to the entire run. The checkpoint retains used
+retries and the next absolute retry time; restarting or manually resuming does
+not reset either. Every worker launch still consumes a worker turn. Progress
+limits, partial work, gate-repair attempts, PRs and validation evidence are
+preserved. An interrupted retry already reserved for launch requires inspection
+before another explicit resume; it is not automatically replayed.
+
+`status` and the controller stream shown by `--watch` report the safe reason
+`provider_capacity`, retry number and next retry time. JSON status includes
+`run.provider_retry` with `attempts`, `limit`, `next_retry`, `next_retry_at` and
+`phase`. After exhaustion, `provider_capacity_exhausted` includes a concrete
+resume command. An explicit manual attempt does not replenish automatic retries.
 
 Common issues and the required response:
 
@@ -1431,6 +1451,8 @@ Common issues and the required response:
 | `invalid_checkpoint`, `invalid_registry_entry`, `identity_changed` | Inspect the exact configuration, state or index before registration/reconfiguration |
 | `previous_failure` | Resolve the recorded failure, then resume the same checkpoint |
 | `closure_integrity` | Inspect canonical merges, the tested candidate and approved closure paths before resuming |
+| `provider_capacity` | Observe the active controller's scheduled retry; resume the same run if its controller was interrupted |
+| `provider_capacity_exhausted` | Restore provider capacity, then use the reported resume command; automatic allowance stays spent |
 | `progress_required` | Resolve the workspace blocker; resume requires observable progress |
 | `turn_limit` | Review the exhausted total budget and deliberately reconfigure approved work |
 | `pending_merge` | Resume may reconcile a canonically confirmed merge |

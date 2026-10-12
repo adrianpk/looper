@@ -10,6 +10,8 @@ configuration, checkpoint, worker conversation, counters, and merge intent.
 | --- | --- |
 | `starting` | Inspect acknowledgement and access-check progress; do not duplicate the launch. |
 | Active controller or worker | Observe that owner. A stale-looking message alone does not establish interruption. |
+| `waiting`, `provider_capacity` | Observe the scheduled retry. If the controller was interrupted, resume the same entry; its deadline and allowance are retained. |
+| `provider_capacity_exhausted` | Restore provider capacity and use the reported resume command. An explicit attempt does not reset automatic retries or worker budgets. |
 | Authentication or missing configuration | Restore the host-owned prerequisite. Repeating launch cannot supply missing access. |
 | Recognized transient remote failure | Let supported bounded read retries finish; inspect the retained blocker if they exhaust. |
 | Validation failure | Read exact diagnostics and candidate evidence; distinguish a code failure from unavailable fixtures or access. |
@@ -24,9 +26,11 @@ including executable paths, credential helpers or agent sockets, and provider
 configuration. Check only the required access; never dump the environment or
 credential files into diagnostic output.
 
-`retryable` is not permission to repeat an unsafe mutation. Only recognized
-transient reads receive automatic bounded retries. Workers, merges, builds,
-and full gates are not interchangeable read probes.
+`retryable` is not permission to repeat an unsafe mutation. Recognized transient
+reads use bounded retries. Confirmed model-capacity failures have a separate
+five-retry policy that resumes the same worker conversation and phase without
+changing the model. Authentication, integrity and unknown execution failures
+remain blocked. Merges, builds and full gates are not interchangeable read probes.
 
 ## Resume without replaying work
 

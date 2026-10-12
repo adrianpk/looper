@@ -252,9 +252,19 @@ func executeAgent(args []string) error {
 		if *machine {
 			return printJSON(agentResponse{SchemaVersion: 1, Status: status, Run: &r})
 		}
-		out.printf(statusStyle(r.Status), "%s: %s / %s · %s · %d/%d integrated\n", status, r.Project, r.Set, r.ID, r.CompletedSlices, r.TotalSlices)
+		label := status
+		if args[0] == "status" {
+			label = r.Status
+		}
+		out.printf(statusStyle(r.Status), "%s: %s / %s · %s · %d/%d integrated\n", label, r.Project, r.Set, r.ID, r.CompletedSlices, r.TotalSlices)
 		if r.Blocker != nil {
 			out.printf(activityFailure, "%s: %s\n", r.Blocker.Code, r.Blocker.Message)
+			if r.Blocker.Code == "provider_capacity_exhausted" && r.Blocker.NextAction != nil {
+				fmt.Println(actionCommand(r.Blocker.NextAction))
+			}
+		}
+		if r.ProviderRetry != nil {
+			fmt.Println(retryDescription(r.ProviderRetry))
 		}
 		if r.Sequence != nil {
 			fmt.Printf("Sequence: %d/%d completed · %s · current %s · %d/%d slices integrated\n", r.Sequence.Completed, r.Sequence.Total, r.Sequence.Phase, filepath.Base(r.Sequence.Current), r.Sequence.CompletedSlices, r.Sequence.TotalSlices)
@@ -280,7 +290,7 @@ func executeAgent(args []string) error {
 	if args[0] == "register" {
 		return respond("registered")
 	}
-	if r.Status == "running" || r.Status == "starting" {
+	if r.Status == "running" || r.Status == "starting" || r.Status == "waiting" {
 		if len(successors) != 0 {
 			return failure("sequence_active", "An active execution cannot accept a changed continuation list", 4, nil)
 		}

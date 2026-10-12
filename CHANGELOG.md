@@ -4,6 +4,12 @@ Notable changes to Looper are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Temporary model-capacity failures automatically retry the same conversation
+  up to five times. Retry timing and budgets survive controller restarts and
+  remain visible in status and watch; other worker failures stay blocked.
+
 ## 0.4.1 - 2026-10-11
 
 ### Added

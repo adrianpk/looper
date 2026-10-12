@@ -33,19 +33,16 @@ func (a *app) work(phase, task string) error {
 	if a.state.Stalled >= a.config.MaxStalled && before == a.state.Fingerprint {
 		return errors.New("worker progress limit reached; resolve the workspace blocker before continuing")
 	}
-	if err := a.preflight(); err != nil {
-		return err
-	}
 	if before != a.state.Fingerprint {
 		a.state.Stalled = 0
 	}
-	a.state.Feedback = task
-	// Reserve the turn before launch so a controller crash cannot refund active work.
-	a.state.Turns++
-	if err := a.save(); err != nil {
-		return err
+	if retry := a.state.ProviderRetry; retry != nil && retry.Phase != "" {
+		if retry.Phase != phase || retry.Instruction != task {
+			return contextFailure("worker", "integrity", "Pending provider retry must resume its retained phase and instruction", 1)
+		}
+		before = retry.Before
 	}
-	if err := a.invokeWorker(phase, task); err != nil {
+	if err := a.workerWithRecovery(phase, task, before); err != nil {
 		return err
 	}
 	if err := a.fetch(); err != nil {
@@ -170,14 +167,13 @@ Return the required JSON status and a concise factual message. A response is not
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	var streamErr error
+	var reported *executionFailure
+	failed := false
 	for scanner.Scan() {
 		if a.activity != nil {
 			a.activity.event(scanner.Bytes())
 		}
-		var event struct {
-			Type     string `json:"type"`
-			ThreadID string `json:"thread_id"`
-		}
+		var event workerEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
@@ -190,6 +186,11 @@ Return the required JSON status and a concise factual message. A response is not
 					streamErr = err
 				}
 			}
+		}
+		// Protocol errors are execution input, independent of optional activity rendering.
+		if event.Type == "turn.failed" || event.Type == "error" && !failed {
+			reported = event.failure()
+			failed = event.Type == "turn.failed"
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -208,7 +209,10 @@ Return the required JSON status and a concise factual message. A response is not
 	if streamErr != nil {
 		return streamErr
 	}
-	if waitErr != nil {
+	if waitErr != nil || failed {
+		if reported != nil {
+			return reported
+		}
 		failure := classifyAccess("worker", fmt.Errorf("%w: %s", waitErr, diagnostic.b.String()), 1)
 		if failure.Blocker.Class == "authentication" || failure.Blocker.Class == "transient" {
 			return failure
@@ -219,6 +223,7 @@ Return the required JSON status and a concise factual message. A response is not
 		return errors.New("Codex supplied no persistent conversation ID; refusing to start another unrelated worker")
 	}
 	a.reply = workerResult{}
+	a.replyPhase = phase
 	if err := readJSON(resultPath, &a.reply); err != nil {
 		// A malformed final response is not a completion signal. Resume the same conversation.
 		a.reply = workerResult{Status: "continue", Message: "Previous response did not satisfy the required JSON schema"}

@@ -73,17 +73,21 @@ type state struct {
 	GateRepairPolicy *gateRepairPolicy `json:"gate_repair_policy,omitempty"`
 	GateFailure      *gateFailure      `json:"gate_failure,omitempty"`
 	GateRepairs      []gateRepair      `json:"gate_repairs,omitempty"`
+	ProviderRetry    *providerRetry    `json:"provider_retry,omitempty"`
 }
 
 type app struct {
-	config   config
-	state    state
-	path     string
-	dir      string
-	reply    workerResult
-	activity *activityMonitor
-	runtime  *runRuntime
-	output   *terminalOutput
+	config     config
+	state      state
+	path       string
+	dir        string
+	reply      workerResult
+	replyPhase string
+	activity   *activityMonitor
+	runtime    *runRuntime
+	output     *terminalOutput
+	lease      *runLease
+	retryClock workerRetryClock
 }
 
 var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -135,6 +139,9 @@ func loadApp(path string) (*app, error) {
 		return nil, errors.New("invalid checkpoint slice position")
 	}
 	if err := a.verifyGateRepairState(); err != nil {
+		return nil, err
+	}
+	if err := a.verifyProviderRetry(); err != nil {
 		return nil, err
 	}
 	return a, nil

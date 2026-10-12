@@ -512,8 +512,11 @@ func (a *app) closeSet() error {
 			continue
 		}
 		for {
-			if err := a.work("prepare_gate", "All recorded slices are integrated. Close delivered slice entries, prepare the approved full-gate prerequisites, leave primary dev clean and pushed, and return ready_for_gate. Do not run the full gate: the controller owns it."); err != nil {
-				return err
+			// A resumed capacity retry may already have finished this preparation turn.
+			if a.replyPhase != "prepare_gate" || a.reply.Status != "ready_for_gate" {
+				if err := a.work("prepare_gate", "All recorded slices are integrated. Close delivered slice entries, prepare the approved full-gate prerequisites, leave primary dev clean and pushed, and return ready_for_gate. Do not run the full gate: the controller owns it."); err != nil {
+					return err
+				}
 			}
 			if a.reply.Status == "ready_for_gate" {
 				break

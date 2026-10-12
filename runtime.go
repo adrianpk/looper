@@ -205,11 +205,12 @@ func requireIdleWorker(a *app) error {
 }
 
 type controllerOptions struct {
-	Activity bool
-	Color    colorMode
-	Output   outputFormat
-	Terminal *terminalRef
-	LaunchID string
+	Activity   bool
+	Color      colorMode
+	Output     outputFormat
+	Terminal   *terminalRef
+	LaunchID   string
+	RetryClock workerRetryClock
 }
 
 func runController(a *app, options controllerOptions) (result error) {
@@ -278,6 +279,8 @@ func runController(a *app, options controllerOptions) (result error) {
 	a, err = loadApp(a.path)
 	if err == nil {
 		a.output = output
+		a.lease = lease
+		a.retryClock = options.RetryClock
 		err = requireIdleWorker(a)
 	}
 	if err != nil {
@@ -318,6 +321,7 @@ func runController(a *app, options controllerOptions) (result error) {
 }
 
 func runOwnedSet(root, a *app, options controllerOptions, identity processIdentity, ready func(error) error) (result error) {
+	a.lease, a.retryClock = root.lease, options.RetryClock
 	if a.path != root.path {
 		l := &runLease{}
 		defer l.close()
@@ -384,6 +388,9 @@ func runOwnedSet(root, a *app, options controllerOptions, identity processIdenti
 		return err
 	}
 	a.output.emit(time.Now(), "controller.started", "", "Controller started", activityRunning)
+	if err := a.resumeProviderRetry(); err != nil {
+		return err
+	}
 	if err := a.run(); err != nil {
 		a.output.emit(time.Now(), "controller.error", "", err.Error(), activityFailure)
 		return err
