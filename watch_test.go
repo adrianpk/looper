@@ -231,6 +231,121 @@ func TestHerdrWatchMissingPane(t *testing.T) {
 	}
 }
 
+// A vanished recorded pane exposes the latest checkpoint without changing execution or treating other errors as closure.
+func TestWatchCheckpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, diagnostic  string
+		invalid, missing, wrongID bool
+		ok                        bool
+	}{
+		{name: "blocked", status: "blocked", diagnostic: `{"id":"cli:pane:read","error":{"code":"pane_not_found","message":"Pane missing"}}`, ok: true},
+		{name: "complete", status: "complete", diagnostic: `{"id":"cli:pane:read","error":{"code":"pane_not_found","message":"Pane missing"}}`, ok: true},
+		{name: "other error", status: "blocked", diagnostic: `{"error":{"code":"permission_denied","message":"pane_not_found in unrelated text"}}`},
+		{name: "unstructured error", status: "blocked", diagnostic: "pane_not_found"},
+		{name: "invalid checkpoint", status: "blocked", diagnostic: `{"error":{"code":"pane_not_found"}}`, invalid: true},
+		{name: "missing checkpoint", status: "blocked", diagnostic: `{"error":{"code":"pane_not_found"}}`, missing: true},
+		{name: "changed identity", status: "blocked", diagnostic: `{"error":{"code":"pane_not_found"}}`, wrongID: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recoveryEnvironment(t)
+			a, fixturePath := setupLoop(t, "normal")
+			a.state.Status = "running"
+			if err := a.save(); err != nil {
+				t.Fatal(err)
+			}
+			entry, err := registerRun(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease, err := acquireRun(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(lease.close)
+			a.runtime = &runRuntime{Terminal: &terminalRef{Backend: "herdr", Session: "fixture-loop", Pane: "recorded-pane"}}
+			if err := a.saveRuntime(); err != nil {
+				t.Fatal(err)
+			}
+			r := inspectRun(entry)
+			if r.Status != "running" {
+				t.Fatalf("fixture did not capture a live view: %+v", r)
+			}
+			lease.close()
+			a.state.Status = tc.status
+			if tc.status == "blocked" {
+				a.state.Blocker = &runBlocker{Code: "candidate_documents", Message: "Tracker slice identities changed", NextAction: commandAction("looper", "resume", "--run", entry.ID, "--detach")}
+			}
+			if err := a.save(); err != nil {
+				t.Fatal(err)
+			}
+			statePath := filepath.Join(a.dir, "state.json")
+			if tc.invalid {
+				if err := os.WriteFile(statePath, []byte("broken JSON"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.missing {
+				if err := os.Remove(statePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.wrongID {
+				r.ID = "run-another-configuration"
+			}
+			bin := t.TempDir()
+			stub := "#!/bin/sh\n[ \"$#\" -eq 11 ] && [ \"$1\" = --session ] && [ \"$2\" = fixture-loop ] && [ \"$3\" = pane ] && [ \"$4\" = read ] && [ \"$5\" = recorded-pane ] || exit 64\nprintf '%s\\n' " + shellQuote(tc.diagnostic) + " >&2\nexit 1\n"
+			if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(stub), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			snapshot := func() map[string]string {
+				t.Helper()
+				files := make(map[string]string)
+				root, err := registryRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range []string{a.dir, a.path, fixturePath, filepath.Join(root, "runs", entry.ID+".json")} {
+					if err := filepath.WalkDir(path, func(path string, d os.DirEntry, err error) error {
+						if err != nil || d.IsDir() {
+							return err
+						}
+						b, err := os.ReadFile(path)
+						files[path] = string(b)
+						return err
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return files
+			}
+			before := snapshot()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			err = watchHerdr(ctx, r, &out)
+			if (err == nil) != tc.ok {
+				t.Fatalf("fallback accepted=%v, want %v: %v; output=%s", err == nil, tc.ok, err, out.String())
+			}
+			if tc.ok {
+				for _, want := range []string{"Checkpoint: " + tc.status, entry.ID} {
+					if !strings.Contains(out.String(), want) {
+						t.Fatalf("retained state missing %q: %s", want, out.String())
+					}
+				}
+				if tc.status == "blocked" && (!strings.Contains(out.String(), "candidate_documents: Tracker slice identities changed") || !strings.Contains(out.String(), actionCommand(a.state.Blocker.NextAction))) {
+					t.Fatalf("saved blocker or recovery action missing: %s", out.String())
+				}
+			} else if out.Len() != 0 {
+				t.Fatalf("unverified checkpoint was displayed: %s", out.String())
+			}
+			if !reflect.DeepEqual(before, snapshot()) {
+				t.Fatal("watch changed checkpoint, configuration, registry or worker fixture")
+			}
+		})
+	}
+}
+
 // A foreign active loop never becomes a local view, and ambiguous local owners require only a local set selector.
 func TestWatchSelection(t *testing.T) {
 	recoveryEnvironment(t)

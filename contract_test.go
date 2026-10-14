@@ -84,10 +84,136 @@ func TestSliceMap(t *testing.T) {
 	if sameSlices(a, b) {
 		t.Fatal("title drift accepted")
 	}
-	for _, bad := range []string{strings.Replace(plan, "Slice 1", "Slice 2", 1), strings.Replace(plan, "ops/default/report/slice-1.md", "../outside.md", 1), "no slice map"} {
-		if _, err := parseSliceTable(bad); err == nil {
-			t.Fatal("invalid slice map accepted")
-		}
+	evidence := "| Evidence | State | Meaning |\n| --- | --- | --- |\n| Slice 1 live Codex probe | passed | Separate owned workers verified. |\n| Slice 1 contract gate | passed | Exact candidate checked. |\n"
+	other := "| Slice | State |\n| --- | --- |\n| Slice 9 | delivered |\n"
+	irisTracker := "| Slice | Short Name | Status | Branch | Expected PR title | PR | Report |\n| --- | --- | --- | --- | --- | --- | --- |\n| Slice 1 | Flow | reviewing | `feat/flow` | `feat(slice-1): deliver flow` | pending | `ops/default/report/slice-1.md` |\n"
+	for _, tc := range []struct {
+		name, doc string
+		ok        bool
+	}{
+		{"plan", plan, true},
+		{"tracker", tracker, true},
+		{"compact separators", strings.ReplaceAll(plan, "---", "-"), true},
+		{"aligned separators", strings.ReplaceAll(plan, "---", ":---:"), true},
+		{"tables before", evidence + "\n" + other + "\n" + plan, true},
+		{"tables after", plan + "\n" + evidence + "\n" + other, true},
+		{"prose boundary", plan + "End of slice map.\n" + evidence, true},
+		{"Iris tracker", "## Entry conditions\n\n" + other + "\n## Slice status\n\n" + irisTracker + "\n## Validation evidence\n\n" + evidence, true},
+		{"number gap", strings.Replace(plan, "Slice 1", "Slice 2", 1), false},
+		{"number repeated", plan + strings.Split(plan, "\n")[2] + "\n", false},
+		{"number padded", strings.Replace(plan, "Slice 1", "Slice 01", 1), false},
+		{"number signed", strings.Replace(plan, "Slice 1", "Slice +1", 1), false},
+		{"label inside", strings.Replace(plan, "Slice 1", "Slice 1 live Codex probe", 1), false},
+		{"foreign row inside", plan + "| Evidence | passed | ignored | ignored | ignored |\n", false},
+		{"short row", plan + "| Slice 2 |\n", false},
+		{"unsafe report", strings.Replace(plan, "ops/default/report/slice-1.md", "../outside.md", 1), false},
+		{"incomplete header", strings.Replace(plan, "Expected PR title", "Title", 1), false},
+		{"duplicate table", plan + "\n" + tracker, false},
+		{"duplicate adjacent", plan + tracker, false},
+		{"duplicate continued numbering", plan + "\n" + strings.Replace(tracker, "Slice 1", "Slice 2", 1), false},
+		{"missing table", "no slice map", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSliceTable(tc.doc)
+			if (err == nil) != tc.ok {
+				t.Fatalf("accepted=%v, want %v: %v", err == nil, tc.ok, err)
+			}
+			if tc.ok && !sameSlices(a, got) {
+				t.Fatalf("other tables changed slice identities: %+v", got)
+			}
+		})
+	}
+}
+
+// Candidate documents must retain frozen identities even while origin/dev is still valid.
+func TestCandidateDocuments(t *testing.T) {
+	for _, tc := range []struct {
+		name, artifact string
+		change         func(string) string
+		ok             bool
+	}{
+		{"unchanged", "tracker", func(s string) string { return s }, true},
+		{"progress update", "tracker", func(s string) string { return s + "\nProgress: Slice 1 reviewing.\n" }, true},
+		{"evidence table", "tracker", func(s string) string {
+			return s + "\n## Validation evidence\n\n| Evidence | State | Meaning |\n| --- | --- | --- |\n| Slice 1 live Codex probe | passed | Owned workers verified. |\n"
+		}, true},
+		{"plan title drift", "plan", func(s string) string { return strings.ReplaceAll(s, "deliver flow", "change scope") }, false},
+		{"tracker branch drift", "tracker", func(s string) string { return strings.ReplaceAll(s, "feat/flow", "feat/other") }, false},
+		{"tracker report drift", "tracker", func(s string) string { return strings.ReplaceAll(s, "slice-1.md", "other.md") }, false},
+		{"malformed row", "tracker", func(s string) string { return strings.ReplaceAll(s, "Slice 1", "Slice 1 live Codex probe") }, false},
+		{"duplicate table", "tracker", func(s string) string { return s + "\n" + s }, false},
+		{"approval removed", "plan", func(s string) string { return strings.ReplaceAll(s, "Approved: 2026-10-07", "Approved:") }, false},
+		{"missing document", "tracker", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, fixturePath := setupLoop(t, "normal")
+			for range 2 {
+				if err := a.work("implement", "Prepare the approved candidate"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var f fixture
+			if err := readJSON(fixturePath, &f); err != nil {
+				t.Fatal(err)
+			}
+			artifact := a.config.Tracker
+			if tc.artifact == "plan" {
+				artifact = a.config.Plan
+			}
+			path := filepath.Join(f.Worktree, artifact)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.change == nil {
+				err = os.Remove(path)
+			} else {
+				err = os.WriteFile(path, []byte(tc.change(string(body))), 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name != "unchanged" {
+				if err := fixtureCommit(f.Worktree, "docs: update candidate artifacts", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.PR.Head.SHA, err = cleanHead(f.Worktree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(fixturePath, f); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.verifyIdentity(); err != nil {
+				t.Fatalf("fixture dev identities changed: %v", err)
+			}
+			parsed, err := a.checkDeliveryPR(a.config.Slices[0], *f.PR)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.ensureValidation(f.Worktree, parsed.Commands); err != nil {
+				t.Fatal(err)
+			}
+			integrated, repair, err := a.verifyAndMerge(a.config.Slices[0], *f.PR, f.Worktree, parsed.Commands)
+			if tc.ok {
+				if err != nil || !integrated || repair != "" {
+					t.Fatalf("valid candidate rejected: integrated=%v repair=%s err=%v", integrated, repair, err)
+				}
+			} else if err == nil || integrated || !strings.Contains(err.Error(), artifact) || !strings.Contains(err.Error(), f.PR.Head.SHA) {
+				t.Fatalf("invalid candidate must identify its commit and artifact: integrated=%v repair=%s err=%v", integrated, repair, err)
+			}
+			if err := readJSON(fixturePath, &f); err != nil {
+				t.Fatal(err)
+			}
+			wantMerges := 0
+			if tc.ok {
+				wantMerges = 1
+			}
+			if f.Merges != wantMerges || f.Calls != 2 || a.state.Pending != nil || a.state.Next != wantMerges {
+				t.Fatalf("candidate verification changed delivery unexpectedly: %+v state=%+v", f, a.state)
+			}
+		})
 	}
 }
 

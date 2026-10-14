@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -69,15 +70,29 @@ func watchHerdr(ctx context.Context, r runInfo, out io.Writer) error {
 		c := exec.CommandContext(readCtx, "herdr", "--session", t.Session, "pane", "read", t.Pane,
 			"--source", "recent-unwrapped", "--lines", "120", "--format", "text")
 		c.Dir, c.Env = r.Repo, terminalEnvironment()
-		snapshot, err := commandOutput(c)
+		var snapshot, diagnostic capture
+		snapshot.limit, diagnostic.limit = 8<<20, 4096
+		c.Stdout, c.Stderr = &snapshot, &diagnostic
+		err := c.Run()
 		cancel()
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil {
-			return err
+			var response struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if !diagnostic.truncated && json.Unmarshal(diagnostic.b.Bytes(), &response) == nil && response.Error.Code == "pane_not_found" {
+				return watchCheckpoint(r, out)
+			}
+			return fmt.Errorf("herdr failed: %w: %s", err, strings.TrimSpace(diagnostic.b.String()))
 		}
-		previous, err = writeWatchSnapshot(out, previous, snapshot)
+		if snapshot.truncated {
+			return errors.New("herdr output exceeds 8 MiB")
+		}
+		previous, err = writeWatchSnapshot(out, previous, strings.TrimSpace(snapshot.b.String()))
 		if err != nil {
 			return err
 		}
@@ -87,6 +102,37 @@ func watchHerdr(ctx context.Context, r runInfo, out io.Writer) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// Read the authoritative checkpoint again: the controller can exit after view selection.
+func watchCheckpoint(r runInfo, out io.Writer) error {
+	a, err := loadApp(r.Config)
+	if err != nil {
+		return fmt.Errorf("Herdr pane is unavailable; checkpoint could not be read: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(a.dir, "state.json")); err != nil {
+		return fmt.Errorf("Herdr pane is unavailable; checkpoint could not be read: %w", err)
+	}
+	entry, err := entryFor(a)
+	if err != nil || entry.ID != r.ID {
+		return errors.New("Herdr pane is unavailable; registered checkpoint identity changed")
+	}
+	if _, err := fmt.Fprintf(out, "Herdr pane is unavailable.\nCheckpoint: %s · %s / %s · %s · %d/%d integrated\n", a.state.Status, entry.Project, entry.Set, entry.ID, a.state.Next, len(a.config.Slices)); err != nil {
+		return err
+	}
+	if b := a.state.Blocker; b != nil {
+		if _, err := fmt.Fprintf(out, "%s: %s\n", b.Code, b.Message); err != nil {
+			return err
+		}
+		if b.NextAction != nil && b.NextAction.Type == "command" && len(b.NextAction.Argv) != 0 {
+			if _, err := fmt.Fprintln(out, actionCommand(b.NextAction)); err != nil {
+				return err
+			}
+		}
+	} else if a.state.Status == "blocked" && a.state.Feedback != "" {
+		_, err = fmt.Fprintln(out, activityText(a.state.Feedback))
+	}
+	return err
 }
 
 // Join overlapping scrollback snapshots without losing repeated events or an unfinished JSONL line.

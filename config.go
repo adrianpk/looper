@@ -320,23 +320,55 @@ func hasApproval(doc string) bool {
 func parseSliceTable(doc string) ([]slice, error) {
 	var columns map[string]int
 	var result []slice
-	for _, line := range strings.Split(doc, "\n") {
+	var found, separatorPending bool
+	var width int
+	separator := regexp.MustCompile(`^:?-+:?$`)
+	for lineNumber, line := range strings.Split(doc, "\n") {
+		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "|") {
+			columns = nil
 			continue
 		}
 		parts := strings.Split(strings.Trim(line, "| \r"), "|")
 		for i := range parts {
 			parts[i] = strings.Trim(strings.TrimSpace(parts[i]), "`")
 		}
-		if len(parts) > 0 && parts[0] == "Slice" {
-			columns = map[string]int{}
+		if parts[0] == "Slice" {
+			header := map[string]int{}
 			for i, p := range parts {
-				columns[p] = i
+				header[p] = i
 			}
+			_, branch := header["Branch"]
+			_, exactBranch := header["Exact branch"]
+			_, title := header["Expected PR title"]
+			_, report := header["Report"]
+			if (branch || exactBranch) && title && report {
+				if found {
+					return nil, errors.New("expected exactly one canonical slice table")
+				}
+				if len(header) != len(parts) {
+					return nil, errors.New("canonical slice table has duplicate columns")
+				}
+				found, separatorPending = true, true
+				columns, width = header, len(parts)
+				continue
+			}
+		}
+		if columns == nil {
 			continue
 		}
-		if len(parts) == 0 || !strings.HasPrefix(parts[0], "Slice ") {
-			continue
+		if len(parts) != width {
+			return nil, fmt.Errorf("slice table row %d has %d cells; expected %d", lineNumber+1, len(parts), width)
+		}
+		if separatorPending {
+			separatorPending = false
+			isSeparator := true
+			for _, p := range parts {
+				isSeparator = isSeparator && separator.MatchString(p)
+			}
+			if isSeparator {
+				continue
+			}
 		}
 		get := func(names ...string) string {
 			for _, name := range names {
@@ -347,7 +379,7 @@ func parseSliceTable(doc string) ([]slice, error) {
 			return ""
 		}
 		n, err := strconv.Atoi(strings.TrimPrefix(parts[0], "Slice "))
-		if err != nil || n != len(result)+1 {
+		if err != nil || parts[0] != fmt.Sprintf("Slice %d", n) || n != len(result)+1 {
 			return nil, errors.New("slice table must have consecutive numbers starting at 1")
 		}
 		s := slice{Number: n, Branch: get("Exact branch", "Branch"), Title: get("Expected PR title"), Report: get("Report")}
@@ -355,6 +387,9 @@ func parseSliceTable(doc string) ([]slice, error) {
 			return nil, fmt.Errorf("Slice %d lacks canonical branch, PR title or report", n)
 		}
 		result = append(result, s)
+		if len(result) > 100 {
+			return nil, errors.New("expected between 1 and 100 slices")
+		}
 	}
 	if len(result) == 0 || len(result) > 100 {
 		return nil, errors.New("expected between 1 and 100 slices")
@@ -382,20 +417,25 @@ func (a *app) verifyIdentity() error {
 	if origin != a.config.Origin {
 		return errors.New("origin URL changed")
 	}
+	return a.verifyDocuments("origin/dev")
+}
+
+// Compare approved identities in the named Git revision, never in mutable working files.
+func (a *app) verifyDocuments(revision string) error {
 	for _, path := range []string{a.config.Plan, a.config.Tracker} {
-		doc, err := git(a.config.Repo, "show", "origin/dev:"+path)
+		doc, err := git(a.config.Repo, "show", revision+":"+path)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s at %s: %w", path, revision, err)
 		}
 		if !hasApproval(doc) {
-			return errors.New("canonical plan/tracker no longer approved")
+			return fmt.Errorf("%s at %s: canonical plan/tracker no longer approved", path, revision)
 		}
 		s, err := parseSliceTable(doc)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s at %s: %w", path, revision, err)
 		}
 		if !sameSlices(s, a.config.Slices) {
-			return errors.New("canonical slice map changed; explicit reconfiguration is required")
+			return fmt.Errorf("%s at %s: canonical slice map changed; explicit reconfiguration is required", path, revision)
 		}
 	}
 	return nil

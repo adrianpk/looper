@@ -4,6 +4,16 @@ Notable changes to Looper are documented here.
 
 ## Unreleased
 
+## 0.4.3 - 2026-10-14
+
+### Fixed
+
+- Slice maps ignore unrelated tables and reject malformed or duplicate
+  canonical tables. PR candidates must preserve approved plan and tracker
+  identities before integration.
+- Herdr text watching shows the retained checkpoint and blocker when the
+  recorded pane disappears.
+
 ## 0.4.2 - 2026-10-14
 
 ### Fixed

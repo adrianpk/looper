@@ -517,17 +517,19 @@ Approved: maintainer, 2026-10-08
 - [ ] Validate the integrated candidate and close the delivery set.
 ```
 
-The parser requires a table whose first header is `Slice`. Required identity
-columns are `Exact branch` or `Branch`, `Expected PR title`, and `Report`.
+The parser requires exactly one table whose first header is `Slice`. Required
+identity columns are `Exact branch` or `Branch`, `Expected PR title`, and `Report`.
 Rows must be `Slice 1`, `Slice 2`, and so on, with 1–100 consecutive slices.
+Only rows inside that table define slices; other tables can contain slice-related
+evidence labels. Invalid rows inside the canonical table are rejected.
 Backticks around values are accepted. Paths must be clean, repository-relative
 paths without `..` escapes. Branches cannot be `dev` or `main`.
 
 Both documents need a nonempty `Approved:` metadata line. `init` checks the local
 committed files; execution also checks their approval and identities in
-`origin/dev`. A `Status: approved` line alone does not provide the required
-approval metadata. The `Full gate:` prose is useful to readers, but `init`
-takes the executable command from `--gate`.
+`origin/dev` and in each exact PR candidate before merging. A `Status: approved`
+line alone does not provide the required approval metadata. The `Full gate:`
+prose is useful to readers, but `init` takes the executable command from `--gate`.
 
 ### Report and closure
 
@@ -908,6 +910,8 @@ Watching opens the existing view without starting a worker or advancing a
 checkpoint. Inside a Herdr pane, the text view reads the recorded session and
 pane once per second. It joins soft-wrapped JSONL events and preserves their
 slice, phase and message. Ctrl+C closes only this viewer.
+If Herdr reports that the recorded pane no longer exists, the text view shows
+the retained checkpoint status, blocker and recovery command when recorded.
 
 Outside Herdr, its native interactive client accepts native input. Selection,
 copying, scrolling and detaching use the backend's own controls or the enclosing

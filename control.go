@@ -212,6 +212,9 @@ func (a *app) verifyAndMerge(s slice, p pullRequest, worktree string, commands [
 	if !current.Mergeable || current.Draft {
 		return false, "PR mergeability or draft state changed during verification; restore the approved handoff", nil
 	}
+	if err := a.verifyDocuments(current.Head.SHA); err != nil {
+		return false, "", fmt.Errorf("candidate documents violate the frozen delivery identity: %w", err)
+	}
 	if err := a.fetch(); err != nil {
 		return false, "", err
 	}
