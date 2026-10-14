@@ -10,6 +10,9 @@ configuration, checkpoint, worker conversation, counters, and merge intent.
 | --- | --- |
 | `starting` | Inspect acknowledgement and access-check progress; do not duplicate the launch. |
 | Active controller or worker | Observe that owner. A stale-looking message alone does not establish interruption. |
+| `waiting` with `run.validation` | Observe the owned batch and current check. Waiting preserves execution budgets and does not require another launch. |
+| `validation_controller_interrupted` | Resume the same entry, or the sequence root, to observe the original batch and reconcile its outcome. |
+| `validation_ownership`, missing or inconsistent outcome | Inspect batch identity, lock ownership and diagnostics. A PID, busy lock or vanished process alone cannot prove delivery or permit duplicate work. |
 | `waiting`, `provider_capacity` | Observe the scheduled retry. If the controller was interrupted, resume the same entry; its deadline and allowance are retained. |
 | `provider_capacity_exhausted` | Restore provider capacity and use the reported resume command. An explicit attempt does not reset automatic retries or worker budgets. |
 | Authentication or missing configuration | Restore the host-owned prerequisite. Repeating launch cannot supply missing access. |
@@ -31,6 +34,10 @@ reads use bounded retries. Confirmed model-capacity failures have a separate
 five-retry policy that resumes the same worker conversation and phase without
 changing the model. Authentication, integrity and unknown execution failures
 remain blocked. Merges, builds and full gates are not interchangeable read probes.
+An owned validation batch is observed until it finishes; observation does not
+retry commands or spend provider retry allowance. Only matching clean-HEAD and
+ordered-command evidence can be reused. Older active validators without batch
+identity remain protected until their owner finishes.
 
 ## Resume without replaying work
 

@@ -15,7 +15,7 @@ import (
 	"syscall"
 )
 
-const version = "0.4.1"
+const version = "0.4.2"
 
 func main() {
 	if err := execute(os.Args[1:]); err != nil {

@@ -266,6 +266,9 @@ func executeAgent(args []string) error {
 		if r.ProviderRetry != nil {
 			fmt.Println(retryDescription(r.ProviderRetry))
 		}
+		if r.Validation != nil {
+			fmt.Println(validationDescription(r.Validation))
+		}
 		if r.Sequence != nil {
 			fmt.Printf("Sequence: %d/%d completed · %s · current %s · %d/%d slices integrated\n", r.Sequence.Completed, r.Sequence.Total, r.Sequence.Phase, filepath.Base(r.Sequence.Current), r.Sequence.CompletedSlices, r.Sequence.TotalSlices)
 		}

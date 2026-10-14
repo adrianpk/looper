@@ -82,7 +82,8 @@ Agent workflow using the preferred defaults:
   An explicit --backend never falls back. auto skips unavailable backends during
   capability checks; a failure after selection never launches a different backend.
   Concurrent resume calls do not duplicate a controller; they return already_running.
-  Active or orphaned workers, validations and unresolved ownership block recovery.
+  Active or orphaned workers and unresolved ownership block recovery.
+  A verified validator for this execution can be observed by the resumed controller.
 
 Execution context and continuation:
   LOOPER_CONTEXT selects a host-owned JSON descriptor; default: $HOME/.config/looper/context.json.
@@ -102,7 +103,8 @@ Streaming output:
   Types: controller.started, controller, controller.completed, controller.error,
   loop.completed, loop.failed,
   worker.started, worker.message, worker.error, tool.started, tool.completed,
-  tool.failed, validation.started, validation.check, heartbeat, activity.control.
+  tool.failed, validation.started, validation.check, validation.waiting,
+  validation.completed, validation.failed, heartbeat, activity.control.
   Levels: info, warning, error, debug. Raw worker payloads are never forwarded.
   looper run --config FILE --activity | jq --unbuffered .
   looper resume --run RUN_ID --activity | jq --unbuffered .

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,21 +17,25 @@ import (
 )
 
 type fixture struct {
-	Repo           string        `json:"repo"`
-	Worktree       string        `json:"worktree"`
-	Mode           string        `json:"mode"`
-	Calls          int           `json:"calls"`
-	Implement      int           `json:"implement"`
-	Prepare        int           `json:"prepare"`
-	Repairs        int           `json:"repairs"`
-	Merges         int           `json:"merges"`
-	Closes         int           `json:"closes"`
-	CloseTask      string        `json:"close_task,omitempty"`
-	WorkerPhases   []string      `json:"worker_phases,omitempty"`
-	WorkerSessions []string      `json:"worker_sessions,omitempty"`
-	Failures       int           `json:"failures,omitempty"`
-	PR             *pullRequest  `json:"pr"`
-	History        []pullRequest `json:"history,omitempty"`
+	Repo                 string          `json:"repo"`
+	Worktree             string          `json:"worktree"`
+	Mode                 string          `json:"mode"`
+	Calls                int             `json:"calls"`
+	Implement            int             `json:"implement"`
+	Prepare              int             `json:"prepare"`
+	Repairs              int             `json:"repairs"`
+	Merges               int             `json:"merges"`
+	Closes               int             `json:"closes"`
+	CloseTask            string          `json:"close_task,omitempty"`
+	WorkerPhases         []string        `json:"worker_phases,omitempty"`
+	WorkerSessions       []string        `json:"worker_sessions,omitempty"`
+	Failures             int             `json:"failures,omitempty"`
+	ValidationCommands   []string        `json:"validation_commands,omitempty"`
+	ValidationAck        string          `json:"validation_ack,omitempty"`
+	Validator            processIdentity `json:"validator,omitempty"`
+	ValidationRepairPath string          `json:"validation_repair_path,omitempty"`
+	PR                   *pullRequest    `json:"pr"`
+	History              []pullRequest   `json:"history,omitempty"`
 }
 
 func TestMain(m *testing.M) {
@@ -58,6 +63,9 @@ func fixtureCommand(tool string, args []string) error {
 	save := func() error { return writeJSON(path, f) }
 	switch tool {
 	case "looper":
+		if len(args) > 0 && args[0] == "_hold-validation" {
+			return fixtureValidationOwner(args[1:])
+		}
 		return execute(args)
 	case "acta":
 		return nil
@@ -233,7 +241,7 @@ func fixtureCommand(tool string, args []string) error {
 		}
 		f.Calls++
 		failed := f.Mode == "capacity-always" || (f.Mode == "capacity-once" || f.Mode == "capacity-partial") && f.Calls == 1 || f.Mode == "capacity-gate" && phase == "repair_gate" && f.Failures == 0 || f.Mode == "capacity-close" && phase == "close" && f.Failures == 0 || f.Mode == "capacity-prepare" && phase == "prepare_gate" && f.Prepare == 1 && f.Failures == 0 || f.Mode == "unknown-json" || f.Mode == "authentication-json"
-		if strings.HasPrefix(f.Mode, "capacity-") || strings.HasSuffix(f.Mode, "-json") {
+		if strings.HasPrefix(f.Mode, "capacity-") || strings.HasPrefix(f.Mode, "validation-") || strings.HasSuffix(f.Mode, "-json") {
 			f.WorkerPhases = append(f.WorkerPhases, phase)
 			session := "new"
 			if len(args) > 1 && args[1] == "resume" {
@@ -301,6 +309,13 @@ func fixtureCommand(tool string, args []string) error {
 				}
 			case "repair":
 				f.Repairs++
+				if f.Mode == "validation-failure" {
+					if err := os.WriteFile(f.ValidationRepairPath, []byte("restored\n"), 0600); err != nil {
+						return err
+					}
+					result.Status = "pr_ready"
+					break
+				}
 				if f.Mode != "repair-body" {
 					return fmt.Errorf("unexpected repair: %s", prompt)
 				}
@@ -426,6 +441,54 @@ func fixtureCommand(tool string, args []string) error {
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "error", "message": message})
 			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"type": "turn.failed", "error": map[string]string{"message": message}})
 			os.Exit(1) // Match Codex exec: error events on stdout, no failure diagnostic on stderr.
+		}
+		if strings.HasPrefix(f.Mode, "validation-") && phase == "implement" && f.Implement%2 == 0 {
+			prefix, _, _ := strings.Cut(f.PR.Body, "\n\n## Validation\n\n")
+			var checks []string
+			for _, command := range f.ValidationCommands {
+				checks = append(checks, "- `"+command+"`")
+			}
+			f.PR.Body = prefix + "\n\n## Validation\n\n" + strings.Join(checks, "\n")
+			if err := save(); err != nil {
+				return err
+			}
+			validationArgs := []string{"validate", "--config", configPath, "--worktree", f.Worktree}
+			for _, command := range f.ValidationCommands {
+				validationArgs = append(validationArgs, "--command", command)
+			}
+			validator := exec.Command("looper", validationArgs...)
+			validatorLog, err := os.Create(configPath + ".validator-output")
+			if err != nil {
+				return err
+			}
+			validator.Stdout, validator.Stderr = validatorLog, validatorLog
+			if err := validator.Start(); err != nil {
+				_ = validatorLog.Close()
+				return err
+			}
+			_ = validatorLog.Close()
+			ack, err := os.Open(f.ValidationAck)
+			if err != nil {
+				return err
+			}
+			scanner := bufio.NewScanner(ack)
+			if !scanner.Scan() {
+				_ = ack.Close()
+				return fmt.Errorf("validation did not acknowledge startup: %v", scanner.Err())
+			}
+			_ = ack.Close()
+			f.Validator, err = identifyProcess(validator.Process.Pid)
+			if err != nil {
+				return err
+			}
+			if f.Mode == "validation-finished" {
+				if err := validator.Wait(); err != nil {
+					return err
+				}
+			} else {
+				_ = validator.Process.Release()
+			}
+			result.Status = "continue"
 		}
 		resultPath := ""
 		for i, arg := range args {

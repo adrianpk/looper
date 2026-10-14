@@ -1011,7 +1011,8 @@ inspect the owner.
 Event types are `controller.started`, `controller`, `controller.completed`,
 `controller.error`, `worker.started`, `worker.message`, `worker.error`,
 `tool.started`, `tool.completed`, `tool.failed`, `validation.started`,
-`validation.check`, `heartbeat` and `activity.control`. Concurrent events retain
+`validation.check`, `validation.waiting`, `validation.completed`,
+`validation.failed`, `heartbeat` and `activity.control`. Concurrent events retain
 complete line framing. JSONL contains no ANSI styling.
 
 ### Human log lines
@@ -1309,6 +1310,19 @@ dirty candidate invalidates it. Without matching evidence, the controller runs
 the published PR checks before merging. Validation accepts 1–100 commands;
 each must be a nonempty single line of at most 8192 bytes.
 
+If a worker returns `continue` while its validation is still active, the
+controller waits for that batch instead of activating another worker. It keeps
+repository ownership across commands and their transitions; another validator,
+merge or successor cannot overlap the batch. Waiting has no validation timeout
+and consumes no worker turns, stalled-progress allowance or provider retries.
+
+The batch records its configuration, repository, candidate, ordered commands,
+process start identity and explicit outcome. The controller verifies the actual
+lock owner, then rechecks the clean candidate, current `dev` and canonical PR
+before delivery. Passed checks are reused only when HEAD and commands still
+match. Failed checks retain diagnostics and enter the existing repair or blocker
+path. A disappeared process without a matching outcome never implies success.
+
 Before merge, the tested PR HEAD must already include current `dev`. The
 controller rechecks live title, body, base, head and mergeability, then submits
 Forgejo's rebase merge with the exact `head_commit_id` and `force_merge: false`.
@@ -1406,7 +1420,7 @@ not refund its budget.
 | `ready` | Valid configuration/checkpoint ready for execution |
 | `starting` | Detached launch is active; ownership acknowledgement is pending |
 | `running` | A controller currently holds the run lock |
-| `waiting` | A controller holds ownership while waiting for a scheduled provider-capacity retry |
+| `waiting` | A controller holds ownership while observing its validation batch or awaiting a provider-capacity retry |
 | `interrupted` | Saved state was running or waiting, but its controller is no longer active |
 | `blocked` | A failure, ownership issue or budget requires attention |
 | `complete` | Checkpoint records completion; executing it again verifies the result |
@@ -1438,6 +1452,19 @@ before another explicit resume; it is not automatically replayed.
 `phase`. After exhaustion, `provider_capacity_exhausted` includes a concrete
 resume command. An explicit manual attempt does not replenish automatic retries.
 
+For validation waits, JSON status includes `run.validation`: batch identity,
+candidate HEAD, outcome, current check, completed checks, elapsed times and log
+path. Human status and watch show the current check and elapsed time. The
+controller observes progress every two seconds and reports continued waiting
+every 30 seconds, independently of optional worker activity display.
+
+An interrupted controller can resume the same validation batch, even while it
+remains active. Its wait context preserves the conversation, counters and
+delivery progress; pinned sequences resume through their original entry.
+Existing configuration hashes, checkpoints and successful evidence remain
+readable. Validators started by older builds only record a command PID and
+cannot be safely adopted while active; let that owner finish before resuming.
+
 Common issues and the required response:
 
 | Code | Response |
@@ -1453,6 +1480,10 @@ Common issues and the required response:
 | `closure_integrity` | Inspect canonical merges, the tested candidate and approved closure paths before resuming |
 | `provider_capacity` | Observe the active controller's scheduled retry; resume the same run if its controller was interrupted |
 | `provider_capacity_exhausted` | Restore provider capacity, then use the reported resume command; automatic allowance stays spent |
+| `validation_controller_interrupted` | Resume the same entry to observe its retained batch and reconcile the outcome |
+| `validation_ownership` | Inspect the batch identity and actual lock owner; do not duplicate validation |
+| `validation_outcome_missing`, `validation_outcome_inconsistent` | Inspect the recorded outcome and diagnostics; process exit alone does not establish success |
+| `validation_candidate_changed` | Restore or validate the intended clean candidate; previous evidence cannot authorize a merge |
 | `progress_required` | Resolve the workspace blocker; resume requires observable progress |
 | `turn_limit` | Review the exhausted total budget and deliberately reconfigure approved work |
 | `pending_merge` | Resume may reconcile a canonically confirmed merge |
@@ -1519,12 +1550,14 @@ Looper stores configuration separately from execution state:
 ├── sequence.json
 ├── sequence-owner.json
 ├── validation.json
+├── validation-run.json
 ├── validate.lock
 ├── worker-schema.json
 ├── worker-result.json
 └── checks/
     ├── <head>.json
-    └── <head>.log
+    ├── <head>.log
+    └── <head>.<validation-id>.log
 ```
 
 Files appear as their corresponding operations run. `state.json` is the atomic
@@ -1537,6 +1570,10 @@ State directories and files are created with private permissions.
 `sequence-owner.json`. These records contain config references, hashes,
 completion receipts and blockers. Runtime metadata also pins the worker home.
 Existing configuration hashes and checkpoints remain compatible.
+`validation-run.json` retains batch ownership, command progress and the terminal
+outcome; `validation.json` keeps the legacy process-identity format. Each batch
+retains its own diagnostic log, while `<head>.log` remains available for older
+gate-repair workflows. Pending validation observation is stored in `state.json`.
 
 The discovery root is `$XDG_STATE_HOME/looper`, or `$HOME/.local/state/looper`
 when `XDG_STATE_HOME` is unset. Registration writes `runs/*.json` there.

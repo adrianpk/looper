@@ -238,11 +238,27 @@ func sequenceStatus(a *app, r *runInfo) {
 		return
 	}
 	r.Sequence = &sequenceInfo{Root: root.path, Current: s.Sets[s.Current].Path, Phase: s.Phase, Completed: len(s.Receipts), Total: len(s.Sets), Blocker: s.Blocker}
+	var validationPending bool
 	if current, err := sequenceApp(root, s.Sets[s.Current]); err == nil {
 		r.Sequence.CompletedSlices, r.Sequence.TotalSlices = current.state.Next, len(current.config.Slices)
 		r.Sequence.WorkerTurns, r.Sequence.WorkerSession = current.state.Turns, current.state.Session
 		if root == a || a.path == current.path {
 			r.ProviderRetry = current.retryInfo()
+			v, active, err := current.validationState()
+			if err != nil && s.Phase != "complete" {
+				r.Status = "blocked"
+				var f *executionFailure
+				if errors.As(err, &f) {
+					r.Blocker = &f.Blocker
+				} else {
+					r.Blocker = &contextFailure("validation", "ownership", "Current set validation ownership cannot be inspected", 1).Blocker
+				}
+				return
+			}
+			if v != nil {
+				r.Validation = v.info()
+			}
+			validationPending = active || current.state.ValidationWait != nil
 		}
 	} else {
 		r.Status, r.Blocker = "blocked", &contextFailure("sequence", "configuration", "Current sequence config or checkpoint changed", 1).Blocker
@@ -271,6 +287,9 @@ func sequenceStatus(a *app, r *runInfo) {
 				r.Blocker = current.state.Blocker
 			}
 		}
+		if validationPending {
+			r.Status, r.Blocker = "waiting", nil
+		}
 	} else {
 		r.Status = "blocked"
 		r.Blocker = s.Blocker
@@ -293,6 +312,9 @@ func sequenceStatus(a *app, r *runInfo) {
 			}
 		}
 		r.Blocker.NextAction = commandAction("looper", "resume", "--config", root.path, "--detach", "--json")
+		if validationPending {
+			r.Status, r.Blocker = "interrupted", validationRecovery(root)
+		}
 	}
 	if root != a {
 		r.Blocker = &runBlocker{Code: "sequence_owned", Component: "sequence", Class: "ownership", Message: "Resume the sequence entry to preserve serial handoff", NextAction: commandAction("looper", "resume", "--config", root.path, "--detach", "--json")}

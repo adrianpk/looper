@@ -64,6 +64,7 @@ type runInfo struct {
 	Blocker          *runBlocker        `json:"blocker,omitempty"`
 	Sequence         *sequenceInfo      `json:"sequence,omitempty"`
 	ProviderRetry    *providerRetryInfo `json:"provider_retry,omitempty"`
+	Validation       *validationInfo    `json:"validation,omitempty"`
 }
 
 // Registry entries are an index. Configuration and checkpoints remain authoritative.
@@ -240,8 +241,25 @@ func inspectRun(e runEntry) (r runInfo) {
 		r.Blocker = &runBlocker{Code: "ownership_unknown", Message: err.Error(), NextAction: inspectAction("inspect_ownership", e.Config)}
 		return r
 	}
+	v, validationActive, validationErr := a.validationState()
+	if v != nil {
+		r.Validation = v.info()
+	}
 	if busy {
 		r.Status = "running"
+		if validationErr != nil {
+			r.Status = "blocked"
+			var f *executionFailure
+			if errors.As(validationErr, &f) {
+				r.Blocker = &f.Blocker
+			} else {
+				r.Blocker = &contextFailure("validation", "ownership", "Validation ownership could not be inspected", 1).Blocker
+			}
+			return r
+		}
+		if a.state.Status == "waiting" && a.state.ValidationWait != nil {
+			r.Status = "waiting"
+		}
 		if a.state.Status == "waiting" && r.ProviderRetry != nil && r.ProviderRetry.NextAt != nil {
 			r.Status, r.Blocker = "waiting", a.state.Blocker
 		}
@@ -277,6 +295,23 @@ func inspectRun(e runEntry) (r runInfo) {
 		r.Status = "blocked"
 		r.Blocker = &runBlocker{Code: "repository_busy", Message: "Another execution owns the repository, or repository ownership cannot be established", NextAction: inspectAction("inspect_repository_owner", a.config.Repo)}
 		return r
+	}
+	if validationErr != nil {
+		r.Status = "blocked"
+		var f *executionFailure
+		if errors.As(validationErr, &f) {
+			r.Blocker = &f.Blocker
+		} else {
+			r.Blocker = &contextFailure("validation", "ownership", "Validation ownership could not be inspected", 1).Blocker
+		}
+		return r
+	}
+	if validationActive || a.state.ValidationWait != nil {
+		if err := requireIdleWorkerProcess(a); err == nil {
+			r.Status = "interrupted"
+			r.Blocker = validationRecovery(a)
+			return r
+		}
 	}
 	if err := workerIdle(a); err != nil {
 		r.Status = "blocked"

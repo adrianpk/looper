@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 func (a *app) fetch() error {
@@ -46,6 +44,9 @@ func (a *app) syncDev() error {
 }
 
 func (a *app) run() error {
+	if err := a.waitValidation(); err != nil {
+		return err
+	}
 	if err := a.fetch(); err != nil {
 		return err
 	}
@@ -64,6 +65,9 @@ func (a *app) run() error {
 		return err
 	}
 	for {
+		if err := a.waitValidation(); err != nil {
+			return err
+		}
 		if err := a.fetch(); err != nil {
 			return err
 		}
@@ -148,52 +152,83 @@ func (a *app) deliverPR(s slice, implementPhase, repairPhase string) error {
 			a.printf(activityRunning, "Slice %d/%d: checking PR #%d and exact-HEAD validation evidence.\n", s.Number, len(a.config.Slices), p.Number)
 		}
 		if err := a.ensureValidation(worktree, parsed.Commands); err != nil {
+			var failure *executionFailure
+			if errors.As(err, &failure) && failure.Blocker.Class != "validation" {
+				return err
+			}
+			a.printf(activityFailure, "Required validation failed: %s\n", err)
 			if err := a.work(repairPhase, fmt.Sprintf("Required validation failed: %s. Correct only the active approved unit and regenerate its PR/evidence.", err)); err != nil {
 				return err
 			}
 			continue
 		}
-		current, err := a.pull(p.Number)
+		integrated, repair, err := a.verifyAndMerge(s, *p, worktree, parsed.Commands)
 		if err != nil {
 			return err
 		}
-		if current.Title != p.Title || current.Body != p.Body || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA || current.State != "open" || current.Merged {
-			a.state.Feedback = "PR changed during verification; restart canonical checks"
-			continue
+		if integrated {
+			return nil
 		}
-		if _, err := a.checkDeliveryPR(s, current); err != nil {
-			return err
-		}
-		if !current.Mergeable || current.Draft {
-			if err := a.work(repairPhase, "PR mergeability or draft state changed during verification; restore the approved handoff"); err != nil {
+		if repair != "" {
+			if err := a.work(repairPhase, repair); err != nil {
 				return err
 			}
-			continue
 		}
-		if err := a.syncDev(); err != nil {
-			if err := a.work(repairPhase, err.Error()); err != nil {
-				return err
-			}
-			continue
-		}
-		dev, err := git(a.config.Repo, "rev-parse", "origin/dev")
-		if err != nil {
-			return err
-		}
-		if dev != current.Base.SHA {
-			if err := a.work(repairPhase, "dev advanced during validation; refresh the PR and its exact-HEAD evidence before integration"); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", dev, current.Head.SHA); err != nil {
-			if err := a.work(repairPhase, "The candidate does not include current dev. Integrate dev under the existing authorization and regenerate exact-HEAD checks. The controller will not merge an untested rebased tree."); err != nil {
-				return err
-			}
-			continue
-		}
-		return a.merge(current)
 	}
+}
+
+// Keep admission closed to new validators from the last candidate checks through
+// merge reconciliation; release it before any repair worker can launch validation.
+func (a *app) verifyAndMerge(s slice, p pullRequest, worktree string, commands []string) (bool, string, error) {
+	guard, err := a.guardValidation()
+	if err != nil {
+		return false, "", err
+	}
+	defer guard.close()
+	head, err := cleanHead(worktree)
+	var e evidence
+	if err != nil || head != p.Head.SHA || readJSON(a.evidencePath(head), &e) != nil || e.Head != head || !equalStrings(e.Commands, commands) {
+		a.state.Feedback = "Candidate or evidence changed after validation; repeat canonical verification"
+		return false, "", nil
+	}
+	v, _, err := a.validationState()
+	if err != nil {
+		return false, "", err
+	}
+	if v != nil && v.Status == "failed" && v.Head == head && equalStrings(v.Commands, commands) {
+		return false, "", nil
+	}
+	current, err := a.pull(p.Number)
+	if err != nil {
+		return false, "", err
+	}
+	if current.Title != p.Title || current.Body != p.Body || current.Head.SHA != p.Head.SHA || current.Base.SHA != p.Base.SHA || current.State != "open" || current.Merged {
+		a.state.Feedback = "PR changed during verification; restart canonical checks"
+		return false, "", nil
+	}
+	if _, err := a.checkDeliveryPR(s, current); err != nil {
+		return false, "", err
+	}
+	if !current.Mergeable || current.Draft {
+		return false, "PR mergeability or draft state changed during verification; restore the approved handoff", nil
+	}
+	if err := a.fetch(); err != nil {
+		return false, "", err
+	}
+	if err := a.syncDev(); err != nil {
+		return false, err.Error(), nil
+	}
+	dev, err := git(a.config.Repo, "rev-parse", "origin/dev")
+	if err != nil {
+		return false, "", err
+	}
+	if dev != current.Base.SHA {
+		return false, "dev advanced during validation; refresh the PR and its exact-HEAD evidence before integration", nil
+	}
+	if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", dev, current.Head.SHA); err != nil {
+		return false, "The candidate does not include current dev. Integrate dev under the existing authorization and regenerate exact-HEAD checks. The controller will not merge an untested rebased tree.", nil
+	}
+	return true, "", a.merge(current)
 }
 
 func (a *app) merge(p pullRequest) error {
@@ -333,13 +368,29 @@ func (a *app) findWorktree(head, branch string) (string, error) {
 func (a *app) evidencePath(head string) string { return filepath.Join(a.dir, "checks", head+".json") }
 
 func (a *app) ensureValidation(dir string, commands []string) error {
+	if err := a.waitValidation(); err != nil {
+		return err
+	}
 	head, err := cleanHead(dir)
 	if err != nil {
 		return err
 	}
+	v, _, err := a.validationState()
+	if err != nil {
+		return err
+	}
+	if v != nil && v.Status == "failed" && v.Head == head && equalStrings(v.Commands, commands) && v.ID != a.state.ValidationHandled {
+		return &executionFailure{Blocker: *v.Failure}
+	}
+	if v != nil && v.Status == "failed" && v.Head == head && equalStrings(v.Commands, commands) {
+		return a.validate(dir, commands)
+	}
 	var e evidence
 	if err := readJSON(a.evidencePath(head), &e); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return validationFailure("outcome_inconsistent", "integrity", "Validation evidence is unreadable; inspect "+a.evidencePath(head))
+	}
+	if v != nil && v.Status == "passed" && v.Head == head && equalStrings(v.Commands, commands) && (e.Head != head || !equalStrings(e.Commands, commands) || e.Log != v.Log) {
+		return validationFailure("outcome_inconsistent", "integrity", "Validation passed without matching candidate, commands and batch evidence; inspect "+a.evidencePath(head))
 	}
 	if e.Head == head && equalStrings(e.Commands, commands) {
 		a.printf(activitySuccess, "Reusing successful checks for the unchanged exact HEAD.\n")
@@ -358,109 +409,6 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func (a *app) validate(dir string, commands []string) error {
-	root, err := git(dir, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return err
-	}
-	if !filepath.IsAbs(root) {
-		root = filepath.Join(dir, root)
-	}
-	canonical, err := git(a.config.Repo, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return err
-	}
-	if !filepath.IsAbs(canonical) {
-		canonical = filepath.Join(a.config.Repo, canonical)
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return err
-	}
-	canonical, err = filepath.EvalSymlinks(canonical)
-	if err != nil {
-		return err
-	}
-	if root != canonical {
-		return errors.New("validation checkout belongs to another repository")
-	}
-	head, err := cleanHead(dir)
-	if err != nil {
-		return err
-	}
-	if len(commands) == 0 || len(commands) > 100 {
-		return errors.New("expected 1 to 100 validation commands")
-	}
-	if err := os.MkdirAll(a.dir, 0700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(a.dir, "validate.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = lock.Close() }()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("another validation process owns this run")
-	}
-	logPath := filepath.Join(a.dir, "checks", head+".log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
-		return err
-	}
-	var log capture
-	log.limit = 1 << 20
-	if a.activity != nil {
-		a.activity.begin("Controller validation", "validation.started")
-		defer a.activity.end()
-	}
-	for i, cmd := range commands {
-		if strings.TrimSpace(cmd) == "" || len(cmd) > 8192 || strings.ContainsAny(cmd, "\r\n") {
-			return errors.New("invalid validation command")
-		}
-		a.printf(activityRunning, "Check %d/%d: %s\n", i+1, len(commands), cmd)
-		if a.activity != nil {
-			a.activity.check(i+1, len(commands), cmd)
-		}
-		_, _ = fmt.Fprintf(&log, "$ %s\n", cmd)
-		child, err := executionCommand(context.Background(), dir, "sh", "-ec", cmd)
-		if err != nil {
-			return err
-		}
-		child.Stdout = &log
-		child.Stderr = &log
-		if err := child.Start(); err != nil {
-			return err
-		}
-		validation, metadataErr := identifyProcess(child.Process.Pid)
-		if metadataErr == nil {
-			metadataErr = writeJSON(filepath.Join(a.dir, "validation.json"), validation)
-		}
-		waitErr := child.Wait()
-		if metadataErr != nil && !errors.Is(metadataErr, os.ErrNotExist) {
-			return errors.Join(metadataErr, waitErr)
-		}
-		if err := waitErr; err != nil {
-			if saveErr := writeAtomic(logPath, log.b.Bytes()); saveErr != nil {
-				return errors.Join(err, saveErr)
-			}
-			return contextFailure("validation", "validation", fmt.Sprintf("Check %d failed; diagnostics: %s", i+1, logPath), 1)
-		}
-		after, err := cleanHead(dir)
-		if err != nil {
-			return err
-		}
-		if after != head {
-			return errors.New("HEAD changed during validation; evidence discarded")
-		}
-	}
-	if log.truncated {
-		_, _ = log.b.WriteString("\n[diagnostics truncated at 1 MiB]\n")
-	}
-	if err := writeAtomic(logPath, log.b.Bytes()); err != nil {
-		return err
-	}
-	return writeJSON(a.evidencePath(head), evidence{Head: head, Commands: commands, Log: logPath})
 }
 
 type closureMetadataError struct {

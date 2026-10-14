@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -117,23 +116,6 @@ func (a *app) clearRetryPhase() {
 	}
 }
 
-// An open lease descriptor proves this controller still holds the repository lock.
-func (a *app) requireRetryOwnership() error {
-	path, err := repositoryLock(a)
-	if err == nil && a.lease != nil {
-		var target os.FileInfo
-		target, err = os.Stat(path)
-		if err == nil {
-			for _, file := range a.lease.files {
-				if held, err := file.Stat(); err == nil && os.SameFile(target, held) {
-					return nil
-				}
-			}
-		}
-	}
-	return contextFailure("controller", "ownership", "Automatic retry requires the retained repository execution lease", 1)
-}
-
 func (a *app) resumeProviderRetry() error {
 	r := a.state.ProviderRetry
 	if r == nil || r.Phase == "" {
@@ -149,6 +131,9 @@ func (a *app) resumeProviderRetry() error {
 
 func (a *app) workerWithRecovery(phase, task, before string) error {
 	for {
+		if err := a.waitValidation(); err != nil {
+			return err
+		}
 		if a.state.Turns >= a.config.MaxTurns {
 			return errors.New("worker turn limit reached; inspect the checkpoint before continuing")
 		}
@@ -166,7 +151,7 @@ func (a *app) workerWithRecovery(phase, task, before string) error {
 			if err := a.waitRetry(*r.NextAt); err != nil {
 				return err
 			}
-			if err := a.requireRetryOwnership(); err != nil {
+			if err := a.requireRepositoryOwnership(); err != nil {
 				return err
 			}
 			if a.state.Pending != nil {
@@ -179,11 +164,25 @@ func (a *app) workerWithRecovery(phase, task, before string) error {
 				return err
 			}
 		}
+		if err := a.waitValidation(); err != nil {
+			return err
+		}
 		if err := requireIdleWorker(a); err != nil {
 			return err
 		}
 		if err := a.preflight(); err != nil {
 			return err
+		}
+		guard, err := a.guardValidation()
+		if err != nil {
+			return err
+		}
+		var repairedValidation string
+		if v, _, err := a.validationState(); err != nil {
+			guard.close()
+			return err
+		} else if v != nil && v.Status == "failed" && v.Failure.Class == "validation" {
+			repairedValidation = v.ID
 		}
 		if retrying {
 			r.Attempts++
@@ -193,9 +192,14 @@ func (a *app) workerWithRecovery(phase, task, before string) error {
 		a.state.Turns++
 		a.state.Status, a.state.Feedback, a.state.Blocker = "running", task, nil
 		if err := a.save(); err != nil {
+			guard.close()
 			return err
 		}
-		err := a.invokeWorker(phase, task)
+		guard.close()
+		err = a.invokeWorker(phase, task)
+		if err == nil && repairedValidation != "" {
+			a.state.ValidationHandled = repairedValidation
+		}
 		var failure *executionFailure
 		if !errors.As(err, &failure) || failure.Blocker.Code != capacityReason {
 			a.clearRetryPhase()

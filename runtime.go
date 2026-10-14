@@ -87,6 +87,10 @@ func (l *runLease) close() {
 }
 
 func (l *runLease) acquire(path string) error {
+	return l.acquireMode(path, syscall.LOCK_EX)
+}
+
+func (l *runLease) acquireMode(path string, mode int) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -95,7 +99,7 @@ func (l *runLease) acquire(path string) error {
 		return err
 	}
 	l.files = append(l.files, f)
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	return syscall.Flock(int(f.Fd()), mode|syscall.LOCK_NB)
 }
 
 func acquireRun(a *app) (*runLease, error) {
@@ -127,24 +131,36 @@ func repositoryLock(a *app) (string, error) {
 	return filepath.Join(common, "slice-loop.lock"), nil
 }
 
+// An open lease descriptor proves this controller still holds the repository lock.
+func (a *app) requireRepositoryOwnership() error {
+	path, err := repositoryLock(a)
+	if err == nil && a.lease != nil {
+		var target os.FileInfo
+		target, err = os.Stat(path)
+		if err == nil {
+			for _, file := range a.lease.files {
+				if held, err := file.Stat(); err == nil && os.SameFile(target, held) {
+					return nil
+				}
+			}
+		}
+	}
+	return contextFailure("controller", "ownership", "Continuation requires the retained repository execution lease", 1)
+}
+
 // Check both persisted ownership and old workers that predate runtime metadata.
 func workerIdle(a *app) error {
-	busy, err := lockBusy(filepath.Join(a.dir, "validate.lock"))
+	_, active, err := a.validationState()
 	if err != nil {
 		return err
 	}
-	if busy {
+	if active {
 		return errors.New("validation still owns this execution; wait for it to finish")
 	}
-	var validation processIdentity
-	if err := readJSON(filepath.Join(a.dir, "validation.json"), &validation); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if alive, err := processState(validation); err != nil {
-		return err
-	} else if alive {
-		return fmt.Errorf("validation process %d is still active; do not repeat its checks", validation.PID)
-	}
+	return workerProcessIdle(a)
+}
+
+func workerProcessIdle(a *app) error {
 	var runtime runRuntime
 	if err := readJSON(filepath.Join(a.dir, "runtime.json"), &runtime); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -197,6 +213,15 @@ func workerIdle(a *app) error {
 
 func requireIdleWorker(a *app) error {
 	err := workerIdle(a)
+	var failure *executionFailure
+	if err != nil && !errors.As(err, &failure) {
+		return contextFailure("worker", "ownership", activityText(err.Error()), 1)
+	}
+	return err
+}
+
+func requireIdleWorkerProcess(a *app) error {
+	err := workerProcessIdle(a)
 	var failure *executionFailure
 	if err != nil && !errors.As(err, &failure) {
 		return contextFailure("worker", "ownership", activityText(err.Error()), 1)
@@ -281,7 +306,7 @@ func runController(a *app, options controllerOptions) (result error) {
 		a.output = output
 		a.lease = lease
 		a.retryClock = options.RetryClock
-		err = requireIdleWorker(a)
+		err = requireIdleWorkerProcess(a)
 	}
 	if err != nil {
 		ready(err)
@@ -329,7 +354,7 @@ func runOwnedSet(root, a *app, options controllerOptions, identity processIdenti
 			return contextFailure("controller", "ownership", "Successor controller ownership cannot be acquired", 1)
 		}
 	}
-	if err := requireIdleWorker(a); err != nil {
+	if err := a.requireAvailableWorker(); err != nil {
 		return err
 	}
 	entry, err := registerRun(a)
@@ -388,6 +413,9 @@ func runOwnedSet(root, a *app, options controllerOptions, identity processIdenti
 		return err
 	}
 	a.output.emit(time.Now(), "controller.started", "", "Controller started", activityRunning)
+	if err := a.waitValidation(); err != nil {
+		return err
+	}
 	if err := a.resumeProviderRetry(); err != nil {
 		return err
 	}

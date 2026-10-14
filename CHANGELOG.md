@@ -4,8 +4,13 @@ Notable changes to Looper are documented here.
 
 ## Unreleased
 
+## 0.4.2 - 2026-10-14
+
 ### Fixed
 
+- Validation that outlives a worker turn keeps the controller waiting and
+  continues delivery automatically when checks finish. Recovery retains the
+  same batch and budgets; status and watch show its progress and outcome.
 - Temporary model-capacity failures automatically retry the same conversation
   up to five times. Retry timing and budgets survive controller restarts and
   remain visible in status and watch; other worker failures stay blocked.

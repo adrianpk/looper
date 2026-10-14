@@ -20,6 +20,9 @@ type workerResult struct {
 const workerSchema = `{"type":"object","additionalProperties":false,"required":["status","message"],"properties":{"status":{"type":"string","enum":["continue","pr_ready","ready_for_gate","closed","blocked"]},"message":{"type":"string"}}}`
 
 func (a *app) work(phase, task string) error {
+	if err := a.waitValidation(); err != nil {
+		return err
+	}
 	if a.state.Turns >= a.config.MaxTurns {
 		return errors.New("worker turn limit reached; inspect the checkpoint before continuing")
 	}
@@ -43,6 +46,9 @@ func (a *app) work(phase, task string) error {
 		before = retry.Before
 	}
 	if err := a.workerWithRecovery(phase, task, before); err != nil {
+		return err
+	}
+	if err := a.waitValidation(); err != nil {
 		return err
 	}
 	if err := a.fetch(); err != nil {
