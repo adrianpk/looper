@@ -1386,12 +1386,14 @@ Example policy (repository-relative paths):
 ```
 
 The controller records each failed candidate and pins repair branches such as
-`fix/flow-gate-1` and exact titles such as
-`fix(gate): correct flow acceptance (attempt 1)`. Repairs reuse the indicated
-existing slice report and canonical PR body. Scope is constrained by the
-approved plan and the policy's path allowlist. The worker diagnoses and fixes;
-the controller verifies the PR, runs focused exact-HEAD checks, reconciles the
-merge outcome and reruns the unchanged full gate on the integrated candidate.
+`fix/flow-gate-1`. Pull requests use the configured title unchanged, such as
+`fix(gate): correct flow acceptance`; repair counters stay in progress and state
+records. Existing runs retain any titles already pinned by older controllers.
+Repairs reuse the indicated existing slice report and canonical PR body. Scope
+is constrained by the approved plan and the policy's path allowlist. The worker
+diagnoses and fixes; the controller verifies the PR, runs focused exact-HEAD
+checks, reconciles the merge outcome and reruns the unchanged full gate on the
+integrated candidate.
 Repair PRs are tracked separately; they do not create new numbered slices.
 
 For an already blocked pre-upgrade run, add `--failed-head FULL_SHA` to the

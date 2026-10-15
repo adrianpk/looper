@@ -172,7 +172,14 @@ func (a *app) gateRepairIdentity(n int) slice {
 	p := a.state.GateRepairPolicy
 	s := a.config.Slices[p.ReportSlice-1]
 	s.Branch = fmt.Sprintf("%s-%d", p.BranchPrefix, n)
-	s.Title = fmt.Sprintf("%s (attempt %d)", p.Title, n)
+	s.Title = p.Title
+	// Preserve identities already pinned by older controllers during recovery.
+	if n > 0 && n <= len(a.state.GateRepairs) {
+		legacy := fmt.Sprintf("%s (attempt %d)", p.Title, n)
+		if a.state.GateRepairs[n-1].Identity.Title == legacy {
+			s.Title = legacy
+		}
+	}
 	s.RequiredCommands = append([]string(nil), p.RequiredCommands...)
 	return s
 }

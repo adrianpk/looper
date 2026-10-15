@@ -13,6 +13,57 @@ func fixtureRepairPolicy() gateRepairPolicy {
 	return gateRepairPolicy{BranchPrefix: "fix/gate", Title: "fix(gate): correct acceptance", ReportSlice: 1, MaxRepairs: 2, AllowedPaths: []string{"runtime.txt"}, RequiredCommands: []string{"test -f runtime.txt"}}
 }
 
+// Public repair titles omit counters; recovery preserves only valid pinned identities.
+func TestGateRepairTitles(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		number      int
+		pinnedTitle string
+		wantTitle   string
+		rejected    bool
+	}{
+		{"first repair", 1, "", "fix(gate): correct acceptance", false},
+		{"later repair", 2, "", "fix(gate): correct acceptance", false},
+		{"pinned clean title", 1, "fix(gate): correct acceptance", "fix(gate): correct acceptance", false},
+		{"pinned legacy title", 1, "fix(gate): correct acceptance (attempt 1)", "fix(gate): correct acceptance (attempt 1)", false},
+		{"altered pinned title", 1, "unrelated title", "fix(gate): correct acceptance", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := setupLoop(t, "normal")
+			a.config.FullGate = "exit 9"
+			policy := fixtureRepairPolicy()
+			a.state.GateRepairPolicy = &policy
+			if tc.pinnedTitle != "" {
+				head, err := cleanHead(a.config.Repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a.state.Next = len(a.config.Slices)
+				a.state.GateFailure = &gateFailure{Head: head, Message: "fixture failure"}
+				identity := a.gateRepairIdentity(tc.number)
+				identity.Title = tc.pinnedTitle
+				a.state.GateRepairs = []gateRepair{{Identity: identity, Base: head, Failure: *a.state.GateFailure}}
+			}
+			identity := a.gateRepairIdentity(tc.number)
+			if identity.Title != tc.wantTitle {
+				t.Fatalf("title = %q, want %q", identity.Title, tc.wantTitle)
+			}
+			wantBranch := "fix/gate-1"
+			if tc.number == 2 {
+				wantBranch = "fix/gate-2"
+			}
+			if identity.Branch != wantBranch {
+				t.Fatalf("branch = %q, want %q", identity.Branch, wantBranch)
+			}
+			if tc.pinnedTitle != "" {
+				if err := a.verifyGateRepairState(); (err != nil) != tc.rejected {
+					t.Fatalf("pinned title validation: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // Gate failures remain red until a scoped PR is validated, integrated and gated again.
 func TestGateRepairCycle(t *testing.T) {
 	for _, mode := range []string{"gate-auto-repair", "gate-lost-response", "gate-limit", "gate-blocked", "gate-stalled", "gate-unknown-merge", "gate-unauthorized"} {
