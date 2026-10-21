@@ -445,8 +445,14 @@ func (a *app) closeSet() error {
 	if err := a.syncDev(); err != nil {
 		return a.closureFailure("Primary dev must be clean, pushed and synchronized before closure", err)
 	}
+	if err := a.reconcileGateRetry(); err != nil {
+		return err
+	}
 	// Runs without delegated repair authority retain their explicit manual retry workflow.
 	if a.state.GateFailure != nil && a.state.GateRepairPolicy == nil {
+		if len(a.state.GateRetries) != 0 && a.pendingGateRetry() == nil {
+			return errors.New("authorized gate retry failed; inspect diagnostics and authorize another retry before resuming")
+		}
 		a.state.GateFailure = nil
 		if err := a.save(); err != nil {
 			return err
@@ -483,10 +489,16 @@ func (a *app) closeSet() error {
 		if err != nil {
 			return err
 		}
+		if retry := a.pendingGateRetry(); retry != nil && head != retry.Failure.Head {
+			return errors.New("candidate changed after gate retry authorization")
+		}
 		a.printf(activityRunning, "All slices integrated. Running the configured full gate on clean dev %s\n", head)
 		if err := a.validate(a.config.Repo, []string{a.config.FullGate}); err != nil {
 			var failure *executionFailure
 			if !errors.As(err, &failure) || failure.Blocker.Class != "validation" {
+				return err
+			}
+			if err := a.finishGateRetry("failed"); err != nil {
 				return err
 			}
 			a.state.GateFailure = &gateFailure{Head: head, Message: err.Error()}
@@ -500,6 +512,9 @@ func (a *app) closeSet() error {
 		}
 		var e evidence
 		if err := readJSON(a.evidencePath(head), &e); err != nil {
+			return err
+		}
+		if err := a.finishGateRetry("passed"); err != nil {
 			return err
 		}
 		a.state.Gate = &e

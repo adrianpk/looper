@@ -1426,6 +1426,34 @@ Repair count, worker-turn and stalled-progress limits still apply; external bloc
 uncertain merges still stop for inspection. No successful gate is inferred
 from a repair or its focused tests. Completion still requires the full gate.
 
+### Retrying after an environmental correction
+
+When a final gate fails because a host prerequisite is unavailable, restore and
+verify that prerequisite before authorizing one retry on the **same clean
+candidate**. This also works when code-repair authority is exhausted:
+
+```sh
+looper retry-gate --config /path/to/set.json --failed-head FULL_SHA --reason 'Restore the approved native fixture path'
+looper resume --config /path/to/set.json --detach --activity --json
+```
+
+All slices must be integrated, with no active controller, worker, validator,
+pending merge, active repair or successful gate. The latest validator metadata
+and retained diagnostics must still describe the failed configured full gate on
+that exact primary HEAD. A focused check cannot substitute for that evidence.
+The reason is a nonempty single line of at most 512 bytes; omit secrets.
+
+Authorization appends a `gate_retries` record containing the original failure,
+validation identity and reason. It changes no configuration, repair allowance,
+merge history, conversation or worker budgets, and starts no process. Repeating
+the identical unused authorization is idempotent; changing or reusing it is
+rejected. History permits at most 100 authorizations. Resume pins the candidate
+and runs the unchanged full gate once, retaining its new outcome. A restart
+reconciles a completed matching batch rather than running it again; missing or
+inconsistent outcomes remain blocked. Another failed attempt requires a new
+explicit authorization or remaining code-repair authority. Continue checkpoints
+containing these records with a controller that supports `retry-gate`.
+
 ## Recovery and blockers
 
 The normal recovery entrypoint is project-local:

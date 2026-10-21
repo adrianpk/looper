@@ -53,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs", "retry-gate":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -63,6 +63,7 @@ func execute(args []string) error {
 	retryUnmerged := fs.Bool("retry-unmerged", false, "operator confirmed the previous uncertain merge did not apply")
 	gatePolicy := fs.String("policy", "", "explicitly approved final-gate repair policy JSON")
 	failedHead := fs.String("failed-head", "", "exact retained failed gate candidate")
+	retryReason := fs.String("reason", "", "operator-confirmed environmental correction for one gate retry")
 	showActivity := fs.Bool("activity", false, "show live worker activity; visibility can change during a run")
 	color := fs.String("color", string(defaultColor), "terminal colors: auto, always, never")
 	output := fs.String("output", string(defaultOutput), "stream output: jsonl, human")
@@ -81,8 +82,18 @@ func execute(args []string) error {
 		return errors.New("unexpected positional arguments")
 	}
 	repairAuthorization := args[0] == "authorize-gate-repairs" || args[0] == "authorize-additional-gate-repairs"
-	if (*gatePolicy != "" || *failedHead != "") && !repairAuthorization {
-		return errors.New("--policy and --failed-head belong to gate repair authorization commands")
+	if *gatePolicy != "" && !repairAuthorization || *failedHead != "" && !repairAuthorization && args[0] != "retry-gate" {
+		return errors.New("--policy belongs to repair authorization; --failed-head belongs to repair authorization or retry-gate")
+	}
+	if *retryReason != "" && args[0] != "retry-gate" {
+		return errors.New("--reason belongs to retry-gate")
+	}
+	if args[0] == "retry-gate" {
+		if err := authorizeGateRetry(*configPath, *failedHead, *retryReason); err != nil {
+			return err
+		}
+		fmt.Println("One same-candidate gate retry authorized. Failure evidence, configuration, repair history and worker budgets preserved. Resume the original run to execute it.")
+		return nil
 	}
 	if repairAuthorization {
 		if *gatePolicy == "" {

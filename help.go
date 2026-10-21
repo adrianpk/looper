@@ -68,6 +68,10 @@ Commands:
             Append a bounded grant only after prior repair authority is exhausted and integrated.
             Pin the exact clean failed candidate; preserve prior policies, history and worker budgets.
             max_repairs counts additional repairs; all grants together permit at most 100.
+  retry-gate --config FILE --failed-head SHA --reason TEXT
+            Authorize one full-gate retry on the same clean candidate after an environmental fix.
+            Preserve failure diagnostics, repair authority, conversation and worker budgets.
+            Requires an idle run and its retained failed full-gate batch; resume executes the retry.
   version   Print the controller version.
 
 Agent workflow using the preferred defaults:

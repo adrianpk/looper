@@ -53,6 +53,14 @@ identity remain protected until their owner finishes.
    delete locks, change config hashes, reset budgets, move worker homes, or
    manufacture missing merge evidence to force execution.
 
+After correcting and verifying a host-only prerequisite, an operator can approve
+one same-candidate final-gate retry with
+`looper retry-gate --config FILE --failed-head FULL_SHA --reason TEXT`, then resume
+the original run. This requires idle ownership, all slices integrated, the exact
+clean failed primary HEAD and its retained failed full-gate batch. It preserves
+configuration, repair authority, diagnostics, history and worker budgets; it
+does not authorize source changes or replace missing validation evidence.
+
 `recover --config FILE --retry-unmerged` clears an uncertain intent only after
 the canonical PR is confirmed still open and unmerged at the recorded head,
 and that recovery action is explicitly authorized. An unavailable forge leaves

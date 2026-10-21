@@ -74,6 +74,7 @@ type state struct {
 	GateRepairAuthorizations []gateRepairAuthorization `json:"gate_repair_authorizations,omitempty"`
 	GateFailure              *gateFailure              `json:"gate_failure,omitempty"`
 	GateRepairs              []gateRepair              `json:"gate_repairs,omitempty"`
+	GateRetries              []gateRetry               `json:"gate_retries,omitempty"`
 	ProviderRetry            *providerRetry            `json:"provider_retry,omitempty"`
 	ValidationWait           *validationWait           `json:"validation_wait,omitempty"`
 	ValidationHandled        string                    `json:"validation_failure_handled,omitempty"`
@@ -142,6 +143,9 @@ func loadApp(path string) (*app, error) {
 		return nil, errors.New("invalid checkpoint slice position")
 	}
 	if err := a.verifyGateRepairState(); err != nil {
+		return nil, err
+	}
+	if err := a.verifyGateRetries(); err != nil {
 		return nil, err
 	}
 	if err := a.verifyProviderRetry(); err != nil {

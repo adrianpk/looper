@@ -6,6 +6,10 @@ Notable changes to Looper are documented here.
 
 ### Added
 
+- Environmental final-gate failures can be retried once on the same clean
+  candidate with `retry-gate`, including after code-repair authority is exhausted.
+  The original failure, configuration, repair history and worker budgets remain
+  retained; completion requires the unchanged full gate to pass.
 - Exhausted final-gate repair authority can receive a separate bounded approval
   with `authorize-additional-gate-repairs`, tied to the exact failed candidate.
   Earlier policies, integrated repairs, conversations and worker budgets remain
