@@ -4,6 +4,13 @@ Notable changes to Looper are documented here.
 
 ## Unreleased
 
+### Added
+
+- Exhausted final-gate repair authority can receive a separate bounded approval
+  with `authorize-additional-gate-repairs`, tied to the exact failed candidate.
+  Earlier policies, integrated repairs, conversations and worker budgets remain
+  unchanged; completion still requires the full gate.
+
 ## 0.4.3 - 2026-10-14
 
 ### Fixed

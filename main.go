@@ -53,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -62,7 +62,7 @@ func execute(args []string) error {
 	worktree := fs.String("worktree", "", "validation checkout")
 	retryUnmerged := fs.Bool("retry-unmerged", false, "operator confirmed the previous uncertain merge did not apply")
 	gatePolicy := fs.String("policy", "", "explicitly approved final-gate repair policy JSON")
-	failedHead := fs.String("failed-head", "", "adopt a retained pre-upgrade failed gate candidate")
+	failedHead := fs.String("failed-head", "", "exact retained failed gate candidate")
 	showActivity := fs.Bool("activity", false, "show live worker activity; visibility can change during a run")
 	color := fs.String("color", string(defaultColor), "terminal colors: auto, always, never")
 	output := fs.String("output", string(defaultOutput), "stream output: jsonl, human")
@@ -80,17 +80,25 @@ func execute(args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
-	if (*gatePolicy != "" || *failedHead != "") && args[0] != "authorize-gate-repairs" {
-		return errors.New("--policy and --failed-head belong to authorize-gate-repairs")
+	repairAuthorization := args[0] == "authorize-gate-repairs" || args[0] == "authorize-additional-gate-repairs"
+	if (*gatePolicy != "" || *failedHead != "") && !repairAuthorization {
+		return errors.New("--policy and --failed-head belong to gate repair authorization commands")
 	}
-	if args[0] == "authorize-gate-repairs" {
+	if repairAuthorization {
 		if *gatePolicy == "" {
-			return errors.New("authorize-gate-repairs requires --policy")
+			return fmt.Errorf("%s requires --policy", args[0])
 		}
-		if err := authorizeGateRepairs(*configPath, *gatePolicy, *failedHead); err != nil {
+		authorize := authorizeGateRepairs
+		if args[0] == "authorize-additional-gate-repairs" {
+			if *failedHead == "" {
+				return errors.New("authorize-additional-gate-repairs requires --failed-head")
+			}
+			authorize = authorizeAdditionalGateRepairs
+		}
+		if err := authorize(*configPath, *gatePolicy, *failedHead); err != nil {
 			return err
 		}
-		fmt.Println("Final-gate repair authority pinned. Configuration, progress and budgets preserved. No worker started.")
+		fmt.Println("Final-gate repair authorization recorded. Existing authority, configuration, progress and budgets preserved. No worker started.")
 		return nil
 	}
 	if !validColor(colorMode(*color)) {

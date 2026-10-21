@@ -375,7 +375,7 @@ func fixtureCommand(tool string, args []string) error {
 				p.Head.Ref, p.Head.SHA, p.Base.SHA = r.Identity.Branch, head, base
 				p.Merged, p.MergedCommit, p.State = false, "", "open"
 				p.Body = strings.Replace(canonicalBody(), strings.Repeat("a", 40), intro, 1)
-				p.Body = strings.Replace(p.Body, "go test ./...", "test -f runtime.txt", 1)
+				p.Body = strings.Replace(p.Body, "go test ./...", r.Identity.RequiredCommands[0], 1)
 				f.PR = &p
 				result.Status = "pr_ready"
 			case "prepare_gate":

@@ -21,6 +21,7 @@ func TestPreferredHelp(t *testing.T) {
 		{"version", "--help"},
 		{"preflight", "--help"},
 		{"authorize-gate-repairs", "--help"},
+		{"authorize-additional-gate-repairs", "--help"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			c := exec.Command("looper", args...)

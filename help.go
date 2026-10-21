@@ -64,6 +64,10 @@ Commands:
             Pin bounded final-gate repair PR authority on an inactive completed-slice run.
             Preserve the frozen configuration, conversation, counters and history; start no worker.
             --failed-head adopts matching retained diagnostics from a pre-upgrade blocked run.
+  authorize-additional-gate-repairs --config FILE --policy FILE --failed-head SHA
+            Append a bounded grant only after prior repair authority is exhausted and integrated.
+            Pin the exact clean failed candidate; preserve prior policies, history and worker budgets.
+            max_repairs counts additional repairs; all grants together permit at most 100.
   version   Print the controller version.
 
 Agent workflow using the preferred defaults:

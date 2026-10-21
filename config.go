@@ -58,24 +58,25 @@ type pendingMerge struct {
 }
 
 type state struct {
-	ConfigHash        string            `json:"config_hash"`
-	Status            string            `json:"status"`
-	Next              int               `json:"next_slice_index"`
-	Session           string            `json:"session,omitempty"`
-	Turns             int               `json:"worker_turns"`
-	Stalled           int               `json:"stalled_turns"`
-	Fingerprint       string            `json:"last_fingerprint,omitempty"`
-	Feedback          string            `json:"feedback,omitempty"`
-	Pending           *pendingMerge     `json:"pending_merge,omitempty"`
-	Merged            []mergeRecord     `json:"merged"`
-	Gate              *evidence         `json:"gate,omitempty"`
-	Blocker           *runBlocker       `json:"blocker,omitempty"`
-	GateRepairPolicy  *gateRepairPolicy `json:"gate_repair_policy,omitempty"`
-	GateFailure       *gateFailure      `json:"gate_failure,omitempty"`
-	GateRepairs       []gateRepair      `json:"gate_repairs,omitempty"`
-	ProviderRetry     *providerRetry    `json:"provider_retry,omitempty"`
-	ValidationWait    *validationWait   `json:"validation_wait,omitempty"`
-	ValidationHandled string            `json:"validation_failure_handled,omitempty"`
+	ConfigHash               string                    `json:"config_hash"`
+	Status                   string                    `json:"status"`
+	Next                     int                       `json:"next_slice_index"`
+	Session                  string                    `json:"session,omitempty"`
+	Turns                    int                       `json:"worker_turns"`
+	Stalled                  int                       `json:"stalled_turns"`
+	Fingerprint              string                    `json:"last_fingerprint,omitempty"`
+	Feedback                 string                    `json:"feedback,omitempty"`
+	Pending                  *pendingMerge             `json:"pending_merge,omitempty"`
+	Merged                   []mergeRecord             `json:"merged"`
+	Gate                     *evidence                 `json:"gate,omitempty"`
+	Blocker                  *runBlocker               `json:"blocker,omitempty"`
+	GateRepairPolicy         *gateRepairPolicy         `json:"gate_repair_policy,omitempty"`
+	GateRepairAuthorizations []gateRepairAuthorization `json:"gate_repair_authorizations,omitempty"`
+	GateFailure              *gateFailure              `json:"gate_failure,omitempty"`
+	GateRepairs              []gateRepair              `json:"gate_repairs,omitempty"`
+	ProviderRetry            *providerRetry            `json:"provider_retry,omitempty"`
+	ValidationWait           *validationWait           `json:"validation_wait,omitempty"`
+	ValidationHandled        string                    `json:"validation_failure_handled,omitempty"`
 }
 
 type app struct {

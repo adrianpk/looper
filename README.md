@@ -1400,8 +1400,29 @@ For an already blocked pre-upgrade run, add `--failed-head FULL_SHA` to the
 authorization command. Adoption requires that exact clean primary HEAD, a
 matching validation blocker and retained diagnostics for the configured gate.
 It avoids rerunning a known failed candidate merely to trigger its repair.
-Authority cannot be replaced or widened after it is pinned. Repair count,
-worker-turn and stalled-progress limits still apply; external blockers and
+Authority cannot be replaced or widened after it is pinned. If every authorized
+repair has integrated and a later full gate fails, the maintainer can explicitly
+approve a separate bounded grant for that exact clean failed candidate:
+
+```sh
+looper authorize-additional-gate-repairs --config /path/to/set.json --policy /path/to/additional-repairs.json --failed-head FULL_SHA
+looper resume --config /path/to/set.json --detach --activity --json
+```
+
+The additional policy uses the same JSON fields. Its `max_repairs` is the number
+of **additional** repairs; all grants together permit at most 100. Branch numbers
+continue globally, so one original repair followed by one additional repair uses
+suffixes `-1` and `-2`. Each repair retains its own grant's title, paths and focused
+commands. The checkpoint appends `gate_repair_authorizations`, retaining the
+original policy, prior grants, merge history, conversation and worker counters.
+Repeating the same approval for the same failed candidate adds no allowance;
+changing it is rejected. Active workers or validators, pending merges, unused
+prior authority and successful gates prevent a new grant. This operation starts
+no worker and does not reset exhausted worker-turn or stalled-progress budgets.
+Older controllers reject checkpoints containing additional authorizations;
+continue them with a controller that supports this command.
+
+Repair count, worker-turn and stalled-progress limits still apply; external blockers and
 uncertain merges still stop for inspection. No successful gate is inferred
 from a repair or its focused tests. Completion still requires the full gate.
 

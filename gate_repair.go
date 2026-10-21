@@ -20,6 +20,14 @@ type gateRepairPolicy struct {
 	RequiredCommands []string `json:"required_commands"`
 }
 
+// Each supplemental grant starts only after all repairs under prior grants merged.
+// Its failed candidate anchors the first repair without rewriting earlier authority.
+type gateRepairAuthorization struct {
+	AfterRepairs int              `json:"after_repairs"`
+	FailedHead   string           `json:"failed_head"`
+	Policy       gateRepairPolicy `json:"policy"`
+}
+
 type gateFailure struct {
 	Head    string `json:"head"`
 	Message string `json:"message"`
@@ -33,6 +41,10 @@ type gateRepair struct {
 }
 
 func (a *app) validateGateRepairPolicy(p gateRepairPolicy) error {
+	return a.validateGateRepairPolicyAt(p, 0)
+}
+
+func (a *app) validateGateRepairPolicyAt(p gateRepairPolicy, after int) error {
 	if p.MaxRepairs < 1 || p.MaxRepairs > 100 || p.ReportSlice < 1 || p.ReportSlice > len(a.config.Slices) || len(p.AllowedPaths) == 0 || len(p.AllowedPaths) > 100 || len(p.RequiredCommands) == 0 || len(p.RequiredCommands) > 100 {
 		return errors.New("gate repairs require a bounded policy, existing report slice, allowed paths and focused validation commands")
 	}
@@ -49,7 +61,7 @@ func (a *app) validateGateRepairPolicy(p gateRepairPolicy) error {
 			return errors.New("gate repair commands must be focused, nonempty single lines distinct from the full gate")
 		}
 	}
-	for i := 1; i <= p.MaxRepairs; i++ {
+	for i := after + 1; i <= after+p.MaxRepairs; i++ {
 		branch := fmt.Sprintf("%s-%d", p.BranchPrefix, i)
 		if _, err := git(a.config.Repo, "check-ref-format", "--branch", branch); err != nil {
 			return err
@@ -86,6 +98,14 @@ func (a *app) pendingIdentity() (slice, error) {
 // Authorization preserves config identity, worker conversation, budgets and merge history.
 // It is only accepted while this repository and run have no active owner.
 func authorizeGateRepairs(path, policyPath, failedHead string) error {
+	return authorizeGateRepairPolicy(path, policyPath, failedHead, false)
+}
+
+func authorizeAdditionalGateRepairs(path, policyPath, failedHead string) error {
+	return authorizeGateRepairPolicy(path, policyPath, failedHead, true)
+}
+
+func authorizeGateRepairPolicy(path, policyPath, failedHead string, additional bool) error {
 	a, err := loadApp(path)
 	if err != nil {
 		return err
@@ -108,6 +128,9 @@ func authorizeGateRepairs(path, policyPath, failedHead string) error {
 	var policy gateRepairPolicy
 	if err := readJSON(policyPath, &policy); err != nil {
 		return err
+	}
+	if additional {
+		return a.addGateRepairAuthorization(policy, failedHead)
 	}
 	if err := a.validateGateRepairPolicy(policy); err != nil {
 		return err
@@ -141,6 +164,70 @@ func authorizeGateRepairs(path, policyPath, failedHead string) error {
 	return a.save()
 }
 
+// Called only while holding the repository/run leases and after checking worker inactivity.
+func (a *app) addGateRepairAuthorization(policy gateRepairPolicy, failedHead string) error {
+	if a.state.GateRepairPolicy == nil || a.state.GateFailure == nil || !fullSHA.MatchString(failedHead) || a.state.GateFailure.Head != failedHead {
+		return errors.New("additional repair authorization requires pinned authority and the retained --failed-head")
+	}
+	head, err := cleanHead(a.config.Repo)
+	if err != nil {
+		return err
+	}
+	if head != failedHead {
+		return errors.New("additional repair authorization requires the exact clean failed candidate")
+	}
+	// A repeated approval cannot mint another allowance for the same candidate.
+	for _, grant := range a.state.GateRepairAuthorizations {
+		if grant.FailedHead == failedHead {
+			if reflect.DeepEqual(grant.Policy, policy) {
+				return nil
+			}
+			return errors.New("additional repair authority for this candidate is already pinned")
+		}
+	}
+	limit := a.gateRepairLimit()
+	if a.activeGateRepair() != nil || len(a.state.GateRepairs) != limit {
+		return errors.New("additional repair authorization requires exhausted authority and all prior repairs integrated")
+	}
+	if err := a.validateGateRepairPolicyAt(policy, limit); err != nil {
+		return err
+	}
+	if limit+policy.MaxRepairs > 100 {
+		return errors.New("total final-gate repair authority cannot exceed 100 repairs")
+	}
+	for _, repair := range a.state.GateRepairs {
+		if repair.Failure.Head == failedHead {
+			return errors.New("the same failed gate candidate cannot authorize another repair")
+		}
+	}
+	a.state.GateRepairAuthorizations = append(a.state.GateRepairAuthorizations, gateRepairAuthorization{AfterRepairs: limit, FailedHead: failedHead, Policy: policy})
+	return a.save()
+}
+
+func (a *app) gateRepairLimit() int {
+	if a.state.GateRepairPolicy == nil {
+		return 0
+	}
+	limit := a.state.GateRepairPolicy.MaxRepairs
+	for _, grant := range a.state.GateRepairAuthorizations {
+		limit += grant.Policy.MaxRepairs
+	}
+	return limit
+}
+
+func (a *app) gateRepairPolicyFor(n int) *gateRepairPolicy {
+	if p := a.state.GateRepairPolicy; p != nil && n > 0 && n <= p.MaxRepairs {
+		return p
+	}
+	for i := range a.state.GateRepairAuthorizations {
+		grant := &a.state.GateRepairAuthorizations[i]
+		if n > grant.AfterRepairs && n <= grant.AfterRepairs+grant.Policy.MaxRepairs {
+			return &grant.Policy
+		}
+	}
+	return nil
+}
+
 func (a *app) prepareGateRepair() error {
 	p := a.state.GateRepairPolicy
 	if p == nil {
@@ -149,7 +236,7 @@ func (a *app) prepareGateRepair() error {
 	if a.activeGateRepair() != nil {
 		return nil
 	}
-	if len(a.state.GateRepairs) >= p.MaxRepairs {
+	if len(a.state.GateRepairs) >= a.gateRepairLimit() {
 		return errors.New("authorized final-gate repair limit reached; checkpoint retained")
 	}
 	for _, r := range a.state.GateRepairs {
@@ -162,14 +249,19 @@ func (a *app) prepareGateRepair() error {
 	if err != nil {
 		return err
 	}
+	for _, grant := range a.state.GateRepairAuthorizations {
+		if n == grant.AfterRepairs+1 && base != grant.FailedHead {
+			return errors.New("primary candidate changed after additional repair authorization")
+		}
+	}
 	a.state.GateRepairs = append(a.state.GateRepairs, gateRepair{Identity: a.gateRepairIdentity(n), Base: base, Failure: *a.state.GateFailure})
 	a.state.Feedback = fmt.Sprintf("Final gate failed at %s: %s. Diagnose the retained failed log and correct only defects within the approved delivery set and gate repair allowed_paths. Preserve every gate requirement; run focused reproduction/regression checks, not the full gate. Use this pinned repair PR identity and the existing report. Do not add numbered slices or start a successor.", a.state.GateFailure.Head, a.state.GateFailure.Message)
-	a.printf(activityRunning, "Final gate repair %d/%d: %s\n", n, p.MaxRepairs, a.state.GateFailure.Message)
+	a.printf(activityRunning, "Final gate repair %d/%d: %s\n", n, a.gateRepairLimit(), a.state.GateFailure.Message)
 	return a.save()
 }
 
 func (a *app) gateRepairIdentity(n int) slice {
-	p := a.state.GateRepairPolicy
+	p := a.gateRepairPolicyFor(n)
 	s := a.config.Slices[p.ReportSlice-1]
 	s.Branch = fmt.Sprintf("%s-%d", p.BranchPrefix, n)
 	s.Title = p.Title
@@ -189,7 +281,7 @@ func (a *app) verifyGateRepairState() error {
 		return errors.New("invalid failed gate candidate")
 	}
 	if a.state.GateRepairPolicy == nil {
-		if len(a.state.GateRepairs) != 0 || a.state.Pending != nil && a.state.Pending.GateRepair {
+		if len(a.state.GateRepairAuthorizations) != 0 || len(a.state.GateRepairs) != 0 || a.state.Pending != nil && a.state.Pending.GateRepair {
 			return errors.New("gate repair checkpoint has no pinned authority")
 		}
 		return nil
@@ -197,7 +289,35 @@ func (a *app) verifyGateRepairState() error {
 	if err := a.validateGateRepairPolicy(*a.state.GateRepairPolicy); err != nil {
 		return err
 	}
-	if a.state.Next != len(a.config.Slices) || len(a.state.GateRepairs) > a.state.GateRepairPolicy.MaxRepairs {
+	limit := a.state.GateRepairPolicy.MaxRepairs
+	if len(a.state.GateRepairAuthorizations) > 99 {
+		return errors.New("too many additional gate repair authorizations")
+	}
+	for _, grant := range a.state.GateRepairAuthorizations {
+		if grant.AfterRepairs != limit || !fullSHA.MatchString(grant.FailedHead) || len(a.state.GateRepairs) < limit {
+			return errors.New("invalid additional gate repair authorization position")
+		}
+		if err := a.validateGateRepairPolicyAt(grant.Policy, limit); err != nil {
+			return err
+		}
+		if limit+grant.Policy.MaxRepairs > 100 {
+			return errors.New("total final-gate repair authority cannot exceed 100 repairs")
+		}
+		for _, repair := range a.state.GateRepairs[:limit] {
+			if repair.Merge == nil || repair.Failure.Head == grant.FailedHead {
+				return errors.New("additional authority does not follow integrated repairs and a fresh failed candidate")
+			}
+		}
+		if len(a.state.GateRepairs) == limit {
+			if a.state.GateFailure == nil || a.state.GateFailure.Head != grant.FailedHead {
+				return errors.New("unused additional authority differs from the retained failed candidate")
+			}
+		} else if a.state.GateRepairs[limit].Failure.Head != grant.FailedHead || a.state.GateRepairs[limit].Base != grant.FailedHead {
+			return errors.New("additional repair differs from its authorized failed candidate")
+		}
+		limit += grant.Policy.MaxRepairs
+	}
+	if a.state.Next != len(a.config.Slices) || len(a.state.GateRepairs) > limit {
 		return errors.New("invalid gate repair checkpoint position")
 	}
 	for i, r := range a.state.GateRepairs {
@@ -225,7 +345,8 @@ func (a *app) checkDeliveryPR(s slice, p pullRequest) (parsedBody, error) {
 	if err != nil || a.activeGateRepair() == nil {
 		return parsed, err
 	}
-	if a.state.GateRepairPolicy == nil {
+	policy := a.gateRepairPolicyFor(len(a.state.GateRepairs))
+	if policy == nil {
 		return parsed, errors.New("gate repair has no delegated authority")
 	}
 	// Forgejo's base SHA can advance after merge; scope is checked from the pinned repair base.
@@ -242,7 +363,7 @@ func (a *app) checkDeliveryPR(s slice, p pullRequest) (parsedBody, error) {
 	}
 	for _, path := range strings.Split(strings.TrimSuffix(paths, "\x00"), "\x00") {
 		allowed := false
-		for _, root := range a.state.GateRepairPolicy.AllowedPaths {
+		for _, root := range policy.AllowedPaths {
 			allowed = allowed || path == root || strings.HasPrefix(path, root+"/")
 		}
 		if !allowed {
