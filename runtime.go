@@ -413,13 +413,18 @@ func runOwnedSet(root, a *app, options controllerOptions, identity processIdenti
 		return err
 	}
 	a.output.emit(time.Now(), "controller.started", "", "Controller started", activityRunning)
-	if err := a.waitValidation(); err != nil {
-		return err
+	advance := func() error {
+		if err := a.waitValidation(); err != nil {
+			return err
+		}
+		if r := a.state.ProviderRetry; r == nil || r.Phase != "diagnose" {
+			if err := a.resumeProviderRetry(); err != nil {
+				return err
+			}
+		}
+		return a.run()
 	}
-	if err := a.resumeProviderRetry(); err != nil {
-		return err
-	}
-	if err := a.run(); err != nil {
+	if err := a.supervise(advance); err != nil {
 		a.output.emit(time.Now(), "controller.error", "", err.Error(), activityFailure)
 		return err
 	}

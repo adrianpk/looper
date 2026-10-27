@@ -319,7 +319,7 @@ func (a *app) waitValidation() error {
 		if a.output != nil {
 			a.output.emit(time.Now(), "validation.failed", "", v.Failure.Message, activityFailure)
 		}
-		if v.Failure.Class != "validation" {
+		if v.Failure.Class != "validation" && !a.outputBatchRecovered(v) {
 			return &executionFailure{Blocker: *v.Failure}
 		}
 	}

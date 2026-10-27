@@ -382,6 +382,13 @@ func (a *app) ensureValidation(dir string, commands []string) error {
 	if err != nil {
 		return err
 	}
+	if err := a.observeRecoveryValidation(); err != nil {
+		return err
+	}
+	if v != nil && v.Status == "failed" && v.Head == head && equalStrings(v.Commands, commands) && a.outputBatchRecovered(v) {
+		err := a.validate(dir, commands)
+		return errors.Join(err, a.observeRecoveryValidation())
+	}
 	if v != nil && v.Status == "failed" && v.Head == head && equalStrings(v.Commands, commands) && v.ID != a.state.ValidationHandled {
 		return &executionFailure{Blocker: *v.Failure}
 	}
@@ -399,7 +406,8 @@ func (a *app) ensureValidation(dir string, commands []string) error {
 		a.printf(activitySuccess, "Reusing successful checks for the unchanged exact HEAD.\n")
 		return nil
 	}
-	return a.validate(dir, commands)
+	err = a.validate(dir, commands)
+	return errors.Join(err, a.observeRecoveryValidation())
 }
 
 func equalStrings(a, b []string) bool {
@@ -448,8 +456,14 @@ func (a *app) closeSet() error {
 	if err := a.reconcileGateRetry(); err != nil {
 		return err
 	}
+	if _, err := a.tryRecoveryGateRetry(); err != nil {
+		return err
+	}
 	// Runs without delegated repair authority retain their explicit manual retry workflow.
 	if a.state.GateFailure != nil && a.state.GateRepairPolicy == nil {
+		if a.state.Recovery != nil {
+			return &recoveryCondition{Code: "gate_failure", Phase: "repair_gate", Message: "Retained full gate failure requires diagnosis or explicit code-repair authority: " + a.state.GateFailure.Message}
+		}
 		if len(a.state.GateRetries) != 0 && a.pendingGateRetry() == nil {
 			return errors.New("authorized gate retry failed; inspect diagnostics and authorize another retry before resuming")
 		}
@@ -505,7 +519,18 @@ func (a *app) closeSet() error {
 			if saveErr := a.save(); saveErr != nil {
 				return errors.Join(err, saveErr)
 			}
+			if err := a.observeRecoveryValidation(); err != nil {
+				return err
+			}
+			if retried, err := a.tryRecoveryGateRetry(); err != nil {
+				return err
+			} else if retried {
+				continue
+			}
 			if a.state.GateRepairPolicy == nil {
+				if a.state.Recovery != nil {
+					return &recoveryCondition{Code: "gate_failure", Phase: "repair_gate", Message: "Full gate failed without delegated code-repair authority; diagnose retained evidence: " + err.Error()}
+				}
 				return fmt.Errorf("full gate failed; do not close the set: %w", err)
 			}
 			continue
@@ -669,16 +694,42 @@ func (a *app) fingerprint() (string, error) {
 		return "", err
 	}
 	progress := worktrees
+	if a.state.Recovery != nil {
+		progress = ""
+	}
+	ownedPath := ""
 	for _, line := range strings.Split(worktrees, "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			ownedPath = strings.TrimPrefix(line, "worktree ")
+		}
+		if a.state.Recovery != nil && strings.HasPrefix(line, "branch ") {
+			if line == "branch refs/heads/"+identity.Branch || ownedPath == a.config.Repo {
+				progress += ownedPath + "\n" + line
+			}
+		}
 		if !strings.HasPrefix(line, "worktree ") {
 			continue
 		}
 		path := strings.TrimPrefix(line, "worktree ")
-		status, err := git(path, "status", "--porcelain")
+		if a.state.Recovery != nil && path != a.config.Repo {
+			branch, err := git(path, "branch", "--show-current")
+			if err != nil {
+				return "", err
+			}
+			if branch != identity.Branch {
+				continue
+			}
+		}
+		statusArgs, diffArgs := []string{"status", "--porcelain"}, []string{"diff", "HEAD"}
+		if a.state.Recovery != nil && path == a.config.Repo {
+			statusArgs = append(append(statusArgs, "--"), a.config.ClosurePaths...)
+			diffArgs = append(append(diffArgs, "--"), a.config.ClosurePaths...)
+		}
+		status, err := git(path, statusArgs...)
 		if err != nil {
 			return "", err
 		}
-		diff, err := git(path, "diff", "HEAD")
+		diff, err := git(path, diffArgs...)
 		if err != nil {
 			return "", err
 		}

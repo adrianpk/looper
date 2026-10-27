@@ -15,23 +15,25 @@ import (
 // in the legacy validation.json file while this version keeps the full record separately.
 type validationRun struct {
 	processIdentity
-	Version    int             `json:"version"`
-	ID         string          `json:"validation_id"`
-	Config     string          `json:"config"`
-	ConfigHash string          `json:"config_hash"`
-	Repository string          `json:"repository"`
-	Worktree   string          `json:"worktree"`
-	Head       string          `json:"head"`
-	Commands   []string        `json:"commands"`
-	Status     string          `json:"status"`
-	Started    time.Time       `json:"started_at"`
-	Finished   *time.Time      `json:"finished_at,omitempty"`
-	Check      int             `json:"check"`
-	Completed  int             `json:"completed_checks"`
-	CheckStart time.Time       `json:"check_started_at"`
-	Child      processIdentity `json:"check_process"`
-	Log        string          `json:"log"`
-	Failure    *runBlocker     `json:"failure,omitempty"`
+	Version       int             `json:"version"`
+	ID            string          `json:"validation_id"`
+	Config        string          `json:"config"`
+	ConfigHash    string          `json:"config_hash"`
+	Repository    string          `json:"repository"`
+	Worktree      string          `json:"worktree"`
+	Head          string          `json:"head"`
+	Commands      []string        `json:"commands"`
+	Status        string          `json:"status"`
+	Started       time.Time       `json:"started_at"`
+	Finished      *time.Time      `json:"finished_at,omitempty"`
+	Check         int             `json:"check"`
+	Completed     int             `json:"completed_checks"`
+	CheckStart    time.Time       `json:"check_started_at"`
+	Child         processIdentity `json:"check_process"`
+	Log           string          `json:"log"`
+	Failure       *runBlocker     `json:"failure,omitempty"`
+	ExitCode      int             `json:"exit_code,omitempty"`
+	FailureFamily string          `json:"failure_family,omitempty"`
 }
 
 type validationWait struct {
@@ -158,6 +160,7 @@ func (a *app) validate(dir string, commands []string) (result error) {
 			a.activity.check(i+1, len(commands), cmd)
 		}
 		_, _ = fmt.Fprintf(&log, "$ %s\n", cmd)
+		outputStart := log.b.Len()
 		child, err := executionCommand(context.Background(), dir, "sh", "-ec", cmd)
 		if err != nil {
 			return err
@@ -178,10 +181,15 @@ func (a *app) validate(dir string, commands []string) (result error) {
 			return errors.Join(err, waitErr)
 		}
 		if waitErr != nil {
+			v.ExitCode = child.ProcessState.ExitCode()
+			v.FailureFamily = validationFailureFamily(log.b.String()[outputStart:])
 			return contextFailure("validation", "validation", fmt.Sprintf("Check %d failed; diagnostics: %s", i+1, logPath), 1)
 		}
 		after, err := cleanHead(dir)
 		if err != nil {
+			if a.state.Recovery != nil {
+				return validationFailure("candidate_dirty", "integrity", "Validation candidate became dirty; retain the failed batch and diagnostics: "+logPath)
+			}
 			return err
 		}
 		if after != head {

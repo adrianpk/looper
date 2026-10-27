@@ -237,6 +237,9 @@ func (a *app) prepareGateRepair() error {
 		return nil
 	}
 	if len(a.state.GateRepairs) >= a.gateRepairLimit() {
+		if a.state.Recovery != nil {
+			return recoveryStop("repair_limit", "budget", "Delegated final-gate repair limit reached; prior grants and budgets are retained")
+		}
 		return errors.New("authorized final-gate repair limit reached; checkpoint retained")
 	}
 	for _, r := range a.state.GateRepairs {
@@ -317,7 +320,8 @@ func (a *app) verifyGateRepairState() error {
 		}
 		limit += grant.Policy.MaxRepairs
 	}
-	if a.state.Next != len(a.config.Slices) || len(a.state.GateRepairs) > limit {
+	upfront := a.state.Recovery != nil && a.state.Recovery.Policy.GateRepair != nil && len(a.state.GateRepairs) == 0 && len(a.state.GateRepairAuthorizations) == 0 && len(a.state.GateRepairPaths) == 0 && a.state.GateFailure == nil && a.state.Gate == nil && (a.state.Pending == nil || !a.state.Pending.GateRepair)
+	if a.state.Next != len(a.config.Slices) && !upfront || len(a.state.GateRepairs) > limit {
 		return errors.New("invalid gate repair checkpoint position")
 	}
 	for i, r := range a.state.GateRepairs {

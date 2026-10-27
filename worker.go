@@ -13,11 +13,31 @@ import (
 )
 
 type workerResult struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
+	Status   string           `json:"status"`
+	Message  string           `json:"message"`
+	Recovery *recoveryRequest `json:"recovery,omitempty"`
 }
 
-const workerSchema = `{"type":"object","additionalProperties":false,"required":["status","message"],"properties":{"status":{"type":"string","enum":["continue","pr_ready","ready_for_gate","closed","blocked"]},"message":{"type":"string"}}}`
+const workerSchema = `{
+  "type": "object", "additionalProperties": false,
+  "required": ["status", "message", "recovery"],
+  "properties": {
+    "status": {"type": "string", "enum": ["continue", "pr_ready", "ready_for_gate", "closed", "blocked", "recovery_requested"]},
+    "message": {"type": "string"},
+    "recovery": {"anyOf": [
+      {"type": "null"},
+      {"type": "object", "additionalProperties": false,
+       "required": ["version", "kind", "paths", "candidate_head", "validation_id", "incident_id", "action_id"],
+       "properties": {
+         "version": {"type": "integer", "enum": [1]},
+         "kind": {"type": "string", "enum": ["repair", "paths", "quarantine", "wait", "decision"]},
+         "paths": {"type": "array", "maxItems": 100, "items": {"type": "string"}},
+         "candidate_head": {"type": "string"}, "validation_id": {"type": "string"},
+         "incident_id": {"type": "integer"}, "action_id": {"type": "integer"}
+       }}
+    ]}
+  }
+}`
 
 func (a *app) work(phase, task string) error {
 	if err := a.waitValidation(); err != nil {
@@ -34,6 +54,9 @@ func (a *app) work(phase, task string) error {
 		return err
 	}
 	if a.state.Stalled >= a.config.MaxStalled && before == a.state.Fingerprint {
+		if a.state.Recovery != nil {
+			return &recoveryCondition{Code: "worker_stalled", Phase: phase, Message: "Worker stalled without verified progress; checkpoint retained"}
+		}
 		return errors.New("worker progress limit reached; resolve the workspace blocker before continuing")
 	}
 	if before != a.state.Fingerprint {
@@ -68,9 +91,21 @@ func (a *app) work(phase, task string) error {
 		return err
 	}
 	if a.reply.Status == "blocked" {
+		if a.state.Recovery != nil {
+			return &recoveryCondition{Code: "worker_blocked", Phase: phase, Message: a.reply.Message, Request: a.reply.Recovery}
+		}
 		return fmt.Errorf("Codex reported a concrete blocker: %s", a.reply.Message)
 	}
+	if a.reply.Status == "recovery_requested" {
+		if a.state.Recovery == nil {
+			return errors.New("worker requested recovery without delegated authority")
+		}
+		return &recoveryCondition{Code: "worker_request", Phase: phase, Message: a.reply.Message, Request: a.reply.Recovery}
+	}
 	if a.state.Stalled >= a.config.MaxStalled {
+		if a.state.Recovery != nil {
+			return &recoveryCondition{Code: "worker_stalled", Phase: phase, Message: "Worker repeatedly returned without observable progress; checkpoint retained"}
+		}
 		return errors.New("worker repeatedly returned without observable progress; checkpoint retained")
 	}
 	return nil
@@ -126,7 +161,9 @@ Use structured subprocess arguments or correct shell quoting for actual paths. V
 
 Perform only the current instruction. In repair_gate, read the last gate_repairs entry from the checkpoint and its covering policy: the original gate_repair_policy or the gate_repair_authorizations entry whose after_repairs range covers that repair number. Explicit gate_repair_path_authorizations additionally permit only their exact files for the matching repair and failed base; they do not change its policy, checks or identity. The last repair's identity overrides the original slice identity: use exactly its branch, title, existing Slice N report and required command prefix. Diagnose the retained gate failure; correct only the approved set within allowed_paths and those exact additional files. Do not invent another numbered slice, weaken checks, run the full gate, merge, or continue a successor. Prepare focused exact-HEAD validation and return pr_ready; the controller integrates and reruns the unchanged full gate. In prepare_gate, prepare fixtures and return ready_for_gate without running the full gate. In close, use the controller's exact gate evidence and close only approved documentation paths. Record required completed activity through Acta. Stop only owned fixtures after their checks finish. Core operational documents must not name an outer product or justify core capabilities by its needs.
 
-Return the required JSON status and a concise factual message. A response is not proof of completion: the controller verifies actual remote and repository state.`, a.path, filepath.Join(a.dir, "state.json"), a.config.Repo, a.config.Plan, a.config.Tracker, phase, task, executable, a.path)
+If the checkpoint pins a recovery delegation, report a technical incident as recovery_requested with recovery.version=1 and kind=paths, repair, quarantine, wait or decision. paths requests list exact existing files. repair results cite validation_id for fresh successful exact-candidate checks. Diagnose the retained incident when Phase is diagnose, and echo its incident_id and action_id. A missing permission inside the delegation is a technical request, not an external decision. Preserve approved observable assertions and resource limits when correcting fixture setup or driver mechanics; explain the correction against the approved contract. Never infer that provenance proves semantic equivalence. New behavior, acceptance weakening or authority outside the delegation requires decision. Do not clear counters or create grants yourself. Generated outputs may use generate-output only with the exact pinned path/producer command, inside the owned validation; unknown outputs must remain untouched.
+
+Return the required JSON status and a concise factual message. Set recovery to null for ordinary results. In a recovery object, include every schema field; use empty strings, an empty paths array and zero IDs when a field does not apply. A response is not proof of completion: the controller verifies actual remote and repository state.`, a.path, filepath.Join(a.dir, "state.json"), a.config.Repo, a.config.Plan, a.config.Tracker, phase, task, executable, a.path)
 	args := []string{"exec"}
 	if a.state.Session != "" {
 		args = append(args, "resume")
@@ -235,7 +272,7 @@ Return the required JSON status and a concise factual message. A response is not
 		a.reply = workerResult{Status: "continue", Message: "Previous response did not satisfy the required JSON schema"}
 	}
 	switch a.reply.Status {
-	case "continue", "pr_ready", "ready_for_gate", "closed", "blocked":
+	case "continue", "pr_ready", "ready_for_gate", "closed", "blocked", "recovery_requested":
 	default:
 		a.reply.Status = "continue"
 	}

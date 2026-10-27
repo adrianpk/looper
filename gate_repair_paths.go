@@ -10,11 +10,12 @@ import (
 
 // A grant augments one existing repair without replacing its frozen policy.
 type gateRepairPathGrant struct {
-	Repair         int      `json:"repair"`
-	FailedHead     string   `json:"failed_head"`
-	AuthorizedHead string   `json:"authorized_head"`
-	Paths          []string `json:"paths"`
-	Reason         string   `json:"reason"`
+	Repair         int               `json:"repair"`
+	FailedHead     string            `json:"failed_head"`
+	AuthorizedHead string            `json:"authorized_head"`
+	Paths          []string          `json:"paths"`
+	Reason         string            `json:"reason"`
+	Source         *repairPathSource `json:"delivery_source,omitempty"`
 }
 
 func validRepairPathReason(reason string) bool {
@@ -61,6 +62,16 @@ func authorizeGateRepairPaths(configPath, failedHead string, paths []string, rea
 	if a.state.Status != "blocked" || a.state.Pending != nil || a.state.Gate != nil || repair == nil || a.state.GateFailure == nil || a.state.Next != len(a.config.Slices) {
 		return errors.New("path authorization requires an idle blocked active repair and no successful gate or uncertain merge")
 	}
+	return a.appendGateRepairPaths(failedHead, paths, reason, nil)
+}
+
+// Both admission paths retain the same exact-file checks and append-only grant.
+// The caller owns the run/repository leases and has checked worker inactivity.
+func (a *app) appendGateRepairPaths(failedHead string, paths []string, reason string, source *repairPathSource) error {
+	repair := a.activeGateRepair()
+	if a.state.Pending != nil || a.state.Gate != nil || repair == nil || a.state.GateFailure == nil || a.state.Next != len(a.config.Slices) {
+		return errors.New("path authorization requires an active repair without a successful gate or uncertain merge")
+	}
 	if !fullSHA.MatchString(failedHead) || failedHead != repair.Base || failedHead != repair.Failure.Head || failedHead != a.state.GateFailure.Head {
 		return errors.New("path authorization requires the exact retained failed base")
 	}
@@ -104,8 +115,10 @@ func authorizeGateRepairPaths(configPath, failedHead string, paths []string, rea
 	if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", failedHead, branchHead); err != nil {
 		return errors.New("repair branch does not include its failed base")
 	}
-	a.state.GateRepairPaths = append(a.state.GateRepairPaths, gateRepairPathGrant{Repair: n, FailedHead: failedHead, AuthorizedHead: branchHead, Paths: paths, Reason: reason})
+	prior := len(a.state.GateRepairPaths)
+	a.state.GateRepairPaths = append(a.state.GateRepairPaths, gateRepairPathGrant{Repair: n, FailedHead: failedHead, AuthorizedHead: branchHead, Paths: paths, Reason: reason, Source: source})
 	if err := a.verifyGateRepairPathGrants(); err != nil {
+		a.state.GateRepairPaths = a.state.GateRepairPaths[:prior]
 		return err
 	}
 	return a.save()
@@ -128,6 +141,11 @@ func (a *app) verifyGateRepairPathGrants() error {
 		for _, path := range grant.Paths {
 			if !a.trackedRepairFile(grant.FailedHead, path) {
 				return errors.New("gate-repair path authorization contains a non-file path")
+			}
+		}
+		if grant.Source != nil {
+			if err := a.verifyRepairPathSource(grant); err != nil {
+				return err
 			}
 		}
 	}

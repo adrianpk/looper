@@ -1456,6 +1456,18 @@ containing these records with a controller that supports `retry-gate`.
 
 ## Recovery and blockers
 
+An idle execution can opt into bounded native recovery once, before execution
+or when adopting it on an existing checkpoint:
+
+looper authorize-recovery --config /path/to/set.json --policy /path/to/recovery.json
+
+The `bounded-v1` profile diagnoses technical blockers inside the owned
+controller, derives eligible exact-file grants and preserves proven generated
+outputs in quarantine. It retains the original conversation, worker budget,
+validation requirements and repository lease. Existing executions receive no
+new authority automatically. The [native recovery reference](docs/reference/native-recovery.md)
+defines the policy, worker protocol, producer attribution and stop conditions.
+
 The normal recovery entrypoint is project-local:
 
 ```sh
@@ -1475,9 +1487,11 @@ not refund its budget.
 | `ready` | Valid configuration/checkpoint ready for execution |
 | `starting` | Detached launch is active; ownership acknowledgement is pending |
 | `running` | A controller currently holds the run lock |
+| `recovering` | The owned controller is handling a retained technical incident |
 | `waiting` | A controller holds ownership while observing its validation batch or awaiting a provider-capacity retry |
 | `interrupted` | Saved state was running or waiting, but its controller is no longer active |
 | `blocked` | A failure, ownership issue or budget requires attention |
+| `needs_decision` | Delegated authority or a hard recovery budget needs a maintainer decision |
 | `complete` | Checkpoint records completion; executing it again verifies the result |
 | `invalid` | Configuration, registry or runtime metadata cannot be safely inspected |
 

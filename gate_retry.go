@@ -15,6 +15,7 @@ type gateRetry struct {
 	ValidationID string           `json:"validation_id"`
 	Reason       string           `json:"reason"`
 	Result       *gateRetryResult `json:"result,omitempty"`
+	Automatic    bool             `json:"automatic,omitempty"`
 }
 
 type gateRetryResult struct {
@@ -87,6 +88,12 @@ func authorizeGateRetry(path, head, reason string) error {
 	if err := requireIdleWorker(a); err != nil {
 		return err
 	}
+	return a.appendGateRetry(head, reason, false)
+}
+
+// Internal recovery uses the same candidate, diagnostics and idempotency rules.
+// Admission owns the existing leases instead of reacquiring them through the CLI.
+func (a *app) appendGateRetry(head, reason string, automatic bool) error {
 	if a.state.Next != len(a.config.Slices) || a.state.Gate != nil || a.state.Pending != nil || a.activeGateRepair() != nil || a.state.GateFailure == nil || a.state.GateFailure.Head != head {
 		return errors.New("gate retry requires integrated slices, their retained failure, and no pending repair or merge")
 	}
@@ -125,7 +132,7 @@ func authorizeGateRetry(path, head, reason string) error {
 	if len(a.state.GateRetries) >= 100 {
 		return errors.New("gate retry authorization limit reached")
 	}
-	a.state.GateRetries = append(a.state.GateRetries, gateRetry{Failure: *a.state.GateFailure, ValidationID: v.ID, Reason: reason})
+	a.state.GateRetries = append(a.state.GateRetries, gateRetry{Failure: *a.state.GateFailure, ValidationID: v.ID, Reason: reason, Automatic: automatic})
 	return a.save()
 }
 

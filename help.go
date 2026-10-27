@@ -75,6 +75,12 @@ Commands:
   authorize-gate-repair-paths --config FILE --failed-head SHA --path FILE [--path FILE ...] --reason TEXT
             Append exact tracked-file authority for an idle blocked active repair.
             Pin its failed base and current branch head; preserve original policies, checks and counters.
+  authorize-recovery --config FILE --policy FILE
+            Pin the bounded-v1 native recovery delegation on an idle unfinished run.
+            Retain existing worker/repair budgets and policies; start no worker.
+  generate-output --config FILE [--worktree DIR] --path FILE --command COMMAND
+            Run an explicitly delegated producer inside its owned validation.
+            Write the exclusively allocated output through LOOPER_OUTPUT_PATH (descriptor 3).
   version   Print the controller version.
 
 Agent workflow using the preferred defaults:

@@ -65,6 +65,7 @@ type runInfo struct {
 	Sequence         *sequenceInfo      `json:"sequence,omitempty"`
 	ProviderRetry    *providerRetryInfo `json:"provider_retry,omitempty"`
 	Validation       *validationInfo    `json:"validation,omitempty"`
+	Recovery         *recoveryInfo      `json:"recovery,omitempty"`
 }
 
 // Registry entries are an index. Configuration and checkpoints remain authoritative.
@@ -214,6 +215,7 @@ func inspectRun(e runEntry) (r runInfo) {
 	r.CompletedSlices = a.state.Next
 	r.WorkerTurns, r.MaxWorkerTurns = a.state.Turns, a.config.MaxTurns
 	r.ProviderRetry = a.retryInfo()
+	r.Recovery = a.recoveryInfo()
 	r.StalledTurns, r.MaxStalledTurns = a.state.Stalled, a.config.MaxStalled
 	if a.state.Next < r.TotalSlices {
 		r.Slice = a.state.Next + 1
@@ -259,6 +261,9 @@ func inspectRun(e runEntry) (r runInfo) {
 		}
 		if a.state.Status == "waiting" && a.state.ValidationWait != nil {
 			r.Status = "waiting"
+		}
+		if a.activeIncident() != nil && r.Status != "waiting" {
+			r.Status = "recovering"
 		}
 		if a.state.Status == "waiting" && r.ProviderRetry != nil && r.ProviderRetry.NextAt != nil {
 			r.Status, r.Blocker = "waiting", a.state.Blocker
@@ -326,13 +331,22 @@ func inspectRun(e runEntry) (r runInfo) {
 	if r.Status == "running" || r.Status == "waiting" {
 		r.Status = "interrupted"
 	}
+	if r.Status == "recovering" {
+		r.Status = "interrupted"
+	}
 	if a.state.Pending != nil {
 		r.Blocker = &runBlocker{Code: "pending_merge", Message: "Reconcile the canonical PR before another merge submission", Retryable: true, NextAction: commandAction("looper", "resume", "--run", e.ID, "--detach", "--json")}
 	} else if a.state.Turns >= a.config.MaxTurns && a.state.Status != "complete" {
 		r.Status = "blocked"
+		if a.state.Recovery != nil {
+			r.Status = "needs_decision"
+		}
 		r.Blocker = &runBlocker{Code: "turn_limit", Message: "The approved worker-turn budget is exhausted; explicit reconfiguration is required", NextAction: inspectAction("review_turn_budget", e.Config)}
-	} else if r.Status == "blocked" && a.state.Blocker != nil {
+	} else if (r.Status == "blocked" || r.Status == "needs_decision") && a.state.Blocker != nil {
 		r.Blocker = a.state.Blocker
+		if r.Blocker.Class == "decision" || r.Blocker.Class == "budget" {
+			r.Status = "needs_decision"
+		}
 		if r.Blocker.Class == "ownership" {
 			copy := *r.Blocker
 			copy.Retryable = true // Live ownership was checked above; resume checks it again under the lease.
@@ -341,7 +355,7 @@ func inspectRun(e runEntry) (r runInfo) {
 	} else if r.Status == "blocked" {
 		r.Blocker = &runBlocker{Code: "previous_failure", Message: activityText(a.state.Feedback), Retryable: true, NextAction: inspectAction("resolve_blocker_then_resume", e.ID)}
 	}
-	if a.state.Pending == nil && a.state.Status != "complete" && a.state.Turns < a.config.MaxTurns && a.state.Stalled >= a.config.MaxStalled {
+	if a.state.Pending == nil && a.state.Status != "complete" && r.Status != "needs_decision" && a.state.Turns < a.config.MaxTurns && a.state.Stalled >= a.config.MaxStalled {
 		current, err := a.fingerprint()
 		if err != nil || current == a.state.Fingerprint {
 			r.Status = "blocked"

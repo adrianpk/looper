@@ -290,6 +290,11 @@ func sequenceStatus(a *app, r *runInfo) {
 		if validationPending {
 			r.Status, r.Blocker = "waiting", nil
 		}
+		if (root == a || a.path == s.Sets[s.Current].Path) && r.Status != "waiting" {
+			if current, err := sequenceApp(root, s.Sets[s.Current]); err == nil && current.activeIncident() != nil {
+				r.Status, r.Recovery = "recovering", current.recoveryInfo()
+			}
+		}
 	} else {
 		r.Status = "blocked"
 		r.Blocker = s.Blocker
@@ -310,6 +315,9 @@ func sequenceStatus(a *app, r *runInfo) {
 				copy.Retryable = true
 				r.Blocker = &copy
 			}
+		}
+		if r.Blocker.Class == "decision" || r.Blocker.Class == "budget" {
+			r.Status = "needs_decision"
 		}
 		r.Blocker.NextAction = commandAction("looper", "resume", "--config", root.path, "--detach", "--json")
 		if validationPending {

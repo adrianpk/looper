@@ -6,6 +6,10 @@ Notable changes to Looper are documented here.
 
 ### Added
 
+- Approved runs can diagnose recoverable technical failures, request scoped file
+  authority and continue under one bounded recovery delegation. Diagnostic and
+  repair budgets survive interruptions; attributed generated outputs can be
+  preserved in quarantine without removing unrelated work.
 - Blocked gate repairs can authorize exact omitted tracked files with
   `authorize-gate-repair-paths`, tied to the failed candidate and repair branch.
   Original policies, required checks, conversations and counters remain retained.

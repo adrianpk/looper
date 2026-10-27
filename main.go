@@ -53,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs", "authorize-gate-repair-paths", "retry-gate":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs", "authorize-gate-repair-paths", "authorize-recovery", "generate-output", "retry-gate":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -82,6 +82,22 @@ func execute(args []string) error {
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if args[0] == "authorize-recovery" {
+		if *gatePolicy == "" {
+			return errors.New("authorize-recovery requires --policy")
+		}
+		if err := authorizeRecovery(*configPath, *gatePolicy); err != nil {
+			return err
+		}
+		fmt.Println("Bounded recovery delegation pinned. Existing budgets, configuration and active executions are unchanged. No worker started.")
+		return nil
+	}
+	if args[0] == "generate-output" {
+		if len(repairPaths) != 1 || len(commands) != 1 {
+			return errors.New("generate-output requires one --path and one --command")
+		}
+		return generateOutput(*configPath, *worktree, repairPaths[0], commands[0])
 	}
 	repairAuthorization := args[0] == "authorize-gate-repairs" || args[0] == "authorize-additional-gate-repairs"
 	pathAuthorization := args[0] == "authorize-gate-repair-paths"

@@ -77,7 +77,7 @@ func (a *app) verifyProviderRetry() error {
 	if r == nil {
 		return nil
 	}
-	validPhase := r.Phase == "implement" || r.Phase == "repair" || r.Phase == "prepare_gate" || r.Phase == "repair_gate" || r.Phase == "close"
+	validPhase := r.Phase == "implement" || r.Phase == "repair" || r.Phase == "prepare_gate" || r.Phase == "repair_gate" || r.Phase == "close" || r.Phase == "diagnose"
 	if r.Reason != capacityReason || r.Attempts < 0 || r.Attempts > len(capacityDelays) || r.Phase != "" && (!validPhase || r.Instruction == "" || a.state.Session == "") || r.NextAt != nil && (r.Phase == "" || r.NextAt.IsZero() || r.Attempts == len(capacityDelays)) {
 		return errors.New("invalid provider retry checkpoint")
 	}
@@ -189,7 +189,16 @@ func (a *app) workerWithRecovery(phase, task, before string) error {
 			r.NextAt = nil
 		}
 		// Reserve both budgets before launch: interruption cannot refund a worker turn or retry.
+		if phase == "diagnose" {
+			if err := a.reserveDiagnostic(); err != nil {
+				guard.close()
+				return err
+			}
+		}
 		a.state.Turns++
+		if a.state.Recovery != nil && phase != "diagnose" {
+			a.state.Recovery.Phase, a.state.Recovery.Instruction = phase, task
+		}
 		a.state.Status, a.state.Feedback, a.state.Blocker = "running", task, nil
 		if err := a.save(); err != nil {
 			guard.close()

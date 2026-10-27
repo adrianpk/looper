@@ -133,6 +133,32 @@ func fixtureCommand(tool string, args []string) error {
 			}
 			return printJSON(prs)
 		}
+		if strings.Contains(endpoint, "/files?") {
+			parsed, _ := url.Parse(endpoint)
+			parts := strings.Split(parsed.Path, "/")
+			number, _ := strconv.Atoi(parts[len(parts)-2])
+			candidates := append([]pullRequest{}, f.History...)
+			if f.PR != nil {
+				candidates = append(candidates, *f.PR)
+			}
+			for _, p := range candidates {
+				if p.Number != number {
+					continue
+				}
+				paths, err := git(f.Repo, "diff", "--name-only", p.Base.SHA, p.Head.SHA)
+				if err != nil {
+					return err
+				}
+				files := []map[string]string{}
+				for _, path := range strings.Split(paths, "\n") {
+					if path != "" {
+						files = append(files, map[string]string{"filename": path, "status": "modified"})
+					}
+				}
+				return printJSON(files)
+			}
+			return fmt.Errorf("unknown provenance PR")
+		}
 		if strings.Contains(endpoint, "/pulls/") {
 			if f.Mode == "closure-auth" {
 				return fmt.Errorf("401 Unauthorized token=private-value")
@@ -250,7 +276,20 @@ func fixtureCommand(tool string, args []string) error {
 			f.WorkerSessions = append(f.WorkerSessions, session)
 		}
 		result := workerResult{Status: "continue", Message: "More work remains"}
-		if f.Mode == "early-complete" {
+		diagnosticRepair := phase == "diagnose" && f.Mode == "recovery-diagnose"
+		if diagnosticRepair {
+			phase = "implement"
+		}
+		if phase == "diagnose" {
+			var incident, action int
+			_, _ = fmt.Sscanf(task, "Diagnose retained incident %d, action %d,", &incident, &action)
+			result = workerResult{Status: "recovery_requested", Message: "The remaining change requires a maintainer decision", Recovery: &recoveryRequest{Version: 1, Kind: "decision", IncidentID: incident, ActionID: action}}
+			if f.Mode == "recovery-stalled-malformed" {
+				result = workerResult{Status: "continue", Message: "No structured result"}
+			}
+		} else if f.Mode == "recovery-diagnose" && f.Calls == 1 {
+			result = workerResult{Status: "blocked", Message: "Technical preparation requires diagnosis"}
+		} else if f.Mode == "early-complete" || strings.HasPrefix(f.Mode, "recovery-stalled") {
 			result.Status = "closed"
 		} else if !failed || f.Mode == "capacity-partial" {
 			switch phase {
@@ -323,6 +362,18 @@ func fixtureCommand(tool string, args []string) error {
 				result.Status = "pr_ready"
 			case "repair_gate":
 				f.Repairs++
+				if f.Mode == "recovery-path" && f.Repairs == 1 {
+					a, err := loadApp(configPath)
+					if err != nil {
+						return err
+					}
+					r := a.activeGateRepair()
+					if _, err := git(f.Worktree, "switch", "-c", r.Identity.Branch, "origin/dev"); err != nil {
+						return err
+					}
+					result = workerResult{Status: "recovery_requested", Message: "The delivery-produced fixture needs exact-file authority", Recovery: &recoveryRequest{Version: 1, Kind: "paths", Paths: []string{"runtime.txt"}, Candidate: r.Base}}
+					break
+				}
 				if f.Mode == "gate-blocked" {
 					result = workerResult{Status: "blocked", Message: "Correction requires an external decision"}
 					break
@@ -342,11 +393,23 @@ func fixtureCommand(tool string, args []string) error {
 					return fmt.Errorf("fixture cannot repair an existing PR")
 				}
 				f.History = append(f.History, *f.PR)
-				if _, err := git(f.Worktree, "switch", "-c", r.Identity.Branch, "origin/dev"); err != nil {
+				branchArgs := []string{"switch", "-c", r.Identity.Branch, "origin/dev"}
+				if f.Mode == "recovery-path" {
+					branchArgs = []string{"switch", r.Identity.Branch}
+				}
+				if _, err := git(f.Worktree, branchArgs...); err != nil {
 					return err
 				}
 				if err := os.WriteFile(filepath.Join(f.Worktree, "runtime.txt"), []byte("repaired\n"+r.Identity.Branch+"\n"), 0600); err != nil {
 					return err
+				}
+				if f.Mode == "recovery-five" {
+					if err := os.MkdirAll(filepath.Join(f.Worktree, "checks"), 0700); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(f.Worktree, "checks", fmt.Sprintf("part-%d", f.Repairs)), []byte("fixture ready\n"), 0600); err != nil {
+						return err
+					}
 				}
 				if f.Mode == "gate-unauthorized" {
 					if err := os.WriteFile(filepath.Join(f.Worktree, "unrelated.txt"), []byte("outside repair authority\n"), 0600); err != nil {
@@ -420,6 +483,21 @@ func fixtureCommand(tool string, args []string) error {
 			default:
 				return fmt.Errorf("unexpected phase %q", phase)
 			}
+		}
+		if diagnosticRepair && f.PR != nil {
+			a, err := loadApp(configPath)
+			if err != nil {
+				return err
+			}
+			if err := a.validate(f.Worktree, []string{"test -f runtime.txt", "git diff --check"}); err != nil {
+				return err
+			}
+			v, _, err := a.validationState()
+			if err != nil {
+				return err
+			}
+			i := a.activeIncident()
+			result = workerResult{Status: "recovery_requested", Message: "Prepared the approved PR with fresh verification", Recovery: &recoveryRequest{Version: 1, Kind: "repair", ValidationID: v.ID, IncidentID: i.ID, ActionID: i.ActionID}}
 		}
 		if failed {
 			f.Failures++

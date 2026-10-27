@@ -79,6 +79,7 @@ type state struct {
 	ProviderRetry            *providerRetry            `json:"provider_retry,omitempty"`
 	ValidationWait           *validationWait           `json:"validation_wait,omitempty"`
 	ValidationHandled        string                    `json:"validation_failure_handled,omitempty"`
+	Recovery                 *recoveryState            `json:"recovery,omitempty"`
 }
 
 type app struct {
@@ -150,6 +151,9 @@ func loadApp(path string) (*app, error) {
 		return nil, err
 	}
 	if err := a.verifyProviderRetry(); err != nil {
+		return nil, err
+	}
+	if err := a.verifyRecovery(); err != nil {
 		return nil, err
 	}
 	if w := a.state.ValidationWait; w != nil && (w.ID == "" || w.Owner.PID < 1 || w.Owner.Start == "" || !fullSHA.MatchString(w.Head) || !filepath.IsAbs(w.Worktree) || len(w.Commands) == 0 || len(w.Commands) > 100) {
