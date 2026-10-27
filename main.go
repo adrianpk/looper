@@ -53,7 +53,7 @@ func execute(args []string) error {
 			return printHelp()
 		}
 		return err
-	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs", "retry-gate":
+	case "run", "status", "check", "validate", "recover", "activity", "preflight", "authorize-gate-repairs", "authorize-additional-gate-repairs", "authorize-gate-repair-paths", "retry-gate":
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -72,6 +72,8 @@ func execute(args []string) error {
 	activityToggle := fs.Bool("toggle", false, "toggle activity for the running controller")
 	var commands stringList
 	fs.Var(&commands, "command", "exact validation command; repeat to preserve order")
+	var repairPaths stringList
+	fs.Var(&repairPaths, "path", "exact tracked file to authorize for the active gate repair")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return printHelp()
@@ -82,11 +84,22 @@ func execute(args []string) error {
 		return errors.New("unexpected positional arguments")
 	}
 	repairAuthorization := args[0] == "authorize-gate-repairs" || args[0] == "authorize-additional-gate-repairs"
-	if *gatePolicy != "" && !repairAuthorization || *failedHead != "" && !repairAuthorization && args[0] != "retry-gate" {
+	pathAuthorization := args[0] == "authorize-gate-repair-paths"
+	if *gatePolicy != "" && !repairAuthorization || *failedHead != "" && !repairAuthorization && !pathAuthorization && args[0] != "retry-gate" {
 		return errors.New("--policy belongs to repair authorization; --failed-head belongs to repair authorization or retry-gate")
 	}
-	if *retryReason != "" && args[0] != "retry-gate" {
-		return errors.New("--reason belongs to retry-gate")
+	if *retryReason != "" && args[0] != "retry-gate" && !pathAuthorization {
+		return errors.New("--reason belongs to retry-gate or authorize-gate-repair-paths")
+	}
+	if len(repairPaths) != 0 && !pathAuthorization {
+		return errors.New("--path belongs to authorize-gate-repair-paths")
+	}
+	if pathAuthorization {
+		if err := authorizeGateRepairPaths(*configPath, *failedHead, repairPaths, *retryReason); err != nil {
+			return err
+		}
+		fmt.Println("Exact gate-repair paths authorized. Original policies, configuration, checks, history and counters preserved. No worker started.")
+		return nil
 	}
 	if args[0] == "retry-gate" {
 		if err := authorizeGateRetry(*configPath, *failedHead, *retryReason); err != nil {

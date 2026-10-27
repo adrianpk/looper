@@ -72,6 +72,9 @@ Commands:
             Authorize one full-gate retry on the same clean candidate after an environmental fix.
             Preserve failure diagnostics, repair authority, conversation and worker budgets.
             Requires an idle run and its retained failed full-gate batch; resume executes the retry.
+  authorize-gate-repair-paths --config FILE --failed-head SHA --path FILE [--path FILE ...] --reason TEXT
+            Append exact tracked-file authority for an idle blocked active repair.
+            Pin its failed base and current branch head; preserve original policies, checks and counters.
   version   Print the controller version.
 
 Agent workflow using the preferred defaults:

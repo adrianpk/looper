@@ -6,6 +6,9 @@ Notable changes to Looper are documented here.
 
 ### Added
 
+- Blocked gate repairs can authorize exact omitted tracked files with
+  `authorize-gate-repair-paths`, tied to the failed candidate and repair branch.
+  Original policies, required checks, conversations and counters remain retained.
 - Environmental final-gate failures can be retried once on the same clean
   candidate with `retry-gate`, including after code-repair authority is exhausted.
   The original failure, configuration, repair history and worker budgets remain

@@ -281,7 +281,7 @@ func (a *app) verifyGateRepairState() error {
 		return errors.New("invalid failed gate candidate")
 	}
 	if a.state.GateRepairPolicy == nil {
-		if len(a.state.GateRepairAuthorizations) != 0 || len(a.state.GateRepairs) != 0 || a.state.Pending != nil && a.state.Pending.GateRepair {
+		if len(a.state.GateRepairAuthorizations) != 0 || len(a.state.GateRepairPaths) != 0 || len(a.state.GateRepairs) != 0 || a.state.Pending != nil && a.state.Pending.GateRepair {
 			return errors.New("gate repair checkpoint has no pinned authority")
 		}
 		return nil
@@ -337,7 +337,7 @@ func (a *app) verifyGateRepairState() error {
 	if a.state.Pending != nil && a.state.Pending.GateRepair && a.activeGateRepair() == nil {
 		return errors.New("pending repair merge has no active repair")
 	}
-	return nil
+	return a.verifyGateRepairPathGrants()
 }
 
 func (a *app) checkDeliveryPR(s slice, p pullRequest) (parsedBody, error) {
@@ -354,6 +354,13 @@ func (a *app) checkDeliveryPR(s slice, p pullRequest) (parsedBody, error) {
 	if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", base, p.Head.SHA); err != nil {
 		return parsed, errors.New("repair candidate does not include its pinned base")
 	}
+	for _, grant := range a.state.GateRepairPaths {
+		if grant.Repair == len(a.state.GateRepairs) {
+			if _, err := git(a.config.Repo, "merge-base", "--is-ancestor", grant.AuthorizedHead, p.Head.SHA); err != nil {
+				return parsed, errors.New("repair candidate does not include its path authorization head")
+			}
+		}
+	}
 	paths, err := git(a.config.Repo, "diff", "--name-only", "--no-renames", "-z", base, p.Head.SHA)
 	if err != nil {
 		return parsed, err
@@ -366,6 +373,7 @@ func (a *app) checkDeliveryPR(s slice, p pullRequest) (parsedBody, error) {
 		for _, root := range policy.AllowedPaths {
 			allowed = allowed || path == root || strings.HasPrefix(path, root+"/")
 		}
+		allowed = allowed || a.gateRepairPathGranted(len(a.state.GateRepairs), path)
 		if !allowed {
 			return parsed, fmt.Errorf("gate repair changes an unauthorized path: %s", path)
 		}

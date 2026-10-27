@@ -72,6 +72,7 @@ type state struct {
 	Blocker                  *runBlocker               `json:"blocker,omitempty"`
 	GateRepairPolicy         *gateRepairPolicy         `json:"gate_repair_policy,omitempty"`
 	GateRepairAuthorizations []gateRepairAuthorization `json:"gate_repair_authorizations,omitempty"`
+	GateRepairPaths          []gateRepairPathGrant     `json:"gate_repair_path_authorizations,omitempty"`
 	GateFailure              *gateFailure              `json:"gate_failure,omitempty"`
 	GateRepairs              []gateRepair              `json:"gate_repairs,omitempty"`
 	GateRetries              []gateRetry               `json:"gate_retries,omitempty"`

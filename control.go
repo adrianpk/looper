@@ -684,6 +684,14 @@ func (a *app) fingerprint() (string, error) {
 		}
 		progress += status + digest([]byte(diff))
 	}
+	// A new scoped approval resolves a real worker blocker without resetting counters.
+	if len(a.state.GateRepairPaths) != 0 {
+		grants, err := json.Marshal(a.state.GateRepairPaths)
+		if err != nil {
+			return "", err
+		}
+		progress += string(grants)
+	}
 	b, err := json.Marshal(struct {
 		PR        *pullRequest
 		Dev       string
